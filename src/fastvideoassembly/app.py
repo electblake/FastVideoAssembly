@@ -3,6 +3,8 @@
 import json
 import sys
 import tempfile
+from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from string import Template
 
@@ -13,17 +15,22 @@ from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QStyle,
     QVBoxLayout,
@@ -33,12 +40,16 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, APP_VERSION, integrations
 from .assembly import (
+    RenderConfig,
     balance,
+    clip_duration,
     clip_from_probe,
-    export_arguments,
+    column_jobs,
+    composition_arguments,
     track_durations,
     video_paths,
 )
+from .audio import mix_peak_arguments, peak_measurement_arguments
 
 COLUMN_NAMES = ("Left", "Center", "Right")
 
@@ -154,6 +165,8 @@ class Application(QObject):
             Qt.DockWidgetArea.LeftDockWidgetArea, self.library_dock
         )
         view_menu.addAction(self.library_dock.toggleViewAction())
+        self.build_render_settings(view_menu)
+        self.build_audio_settings(view_menu)
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -164,17 +177,19 @@ class Application(QObject):
         title.setFont(title_font)
         layout.addWidget(title)
         description = QLabel(
-            "Portrait videos only (aspect ratio < 1). Balance duration, then play "
-            "each column shortest to longest."
+            "Portrait videos only (aspect ratio < 1). Keep column durations similar, "
+            "then choose shortest-to-longest or a balanced mix of clip lengths."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
         output_strip = QHBoxLayout()
+        self.column_headers = []
         for index, name in enumerate(COLUMN_NAMES):
             label = QLabel(f"{index + 1} · {name}\n⅓ of output · 640 × 1080")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setMargin(12)
             output_strip.addWidget(label, 1)
+            self.column_headers.append(label)
         layout.addLayout(output_strip)
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         self.timeline = pg.PlotWidget()
@@ -213,9 +228,15 @@ class Application(QObject):
         self.splitter.setSizes([240, 300])
         layout.addWidget(self.splitter, 1)
         edit_buttons = QHBoxLayout()
-        self.balance_button = QPushButton("Balance shortest → longest")
+        self.balance_button = QPushButton("Shortest to Longest")
         self.balance_button.clicked.connect(self.rebalance)
         edit_buttons.addWidget(self.balance_button)
+        self.mixed_button = QPushButton("Balanced")
+        self.mixed_button.setToolTip(
+            "Balance total column durations, then alternate long and short clips in each column."
+        )
+        self.mixed_button.clicked.connect(lambda: self.rebalance(mixed=True))
+        edit_buttons.addWidget(self.mixed_button)
         self.up_button = QPushButton("Move earlier")
         self.up_button.clicked.connect(lambda: self.reorder(-1))
         self.down_button = QPushButton("Move later")
@@ -235,13 +256,9 @@ class Application(QObject):
         self.summary = QLabel()
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        output_info = QLabel(
-            "Output: MP4 · H.264 · 1920 × 1080 · 30 fps · No audio\n"
-            "Clips fit without cropping. Shorter columns hold their final frame. "
-            "Double-click a clip to open its source."
-        )
-        output_info.setWordWrap(True)
-        layout.addWidget(output_info)
+        self.output_info = QLabel()
+        self.output_info.setWordWrap(True)
+        layout.addWidget(self.output_info)
         export_row = QHBoxLayout()
         self.export_button = QPushButton("Render three-column video…")
         self.export_button.setProperty("variant", "primary")
@@ -249,7 +266,7 @@ class Application(QObject):
         self.export_button.clicked.connect(self.choose_export)
         export_row.addWidget(self.export_button, 1)
         self.stop_button = QPushButton("Stop rendering")
-        self.stop_button.clicked.connect(lambda: self.process.write(b"q\n"))
+        self.stop_button.clicked.connect(self.stop_export)
         export_row.addWidget(self.stop_button)
         layout.addLayout(export_row)
         self.progress = QProgressBar()
@@ -264,6 +281,133 @@ class Application(QObject):
         self.window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.hide()
         view_menu.addAction(self.log_dock.toggleViewAction())
+
+    def build_render_settings(self, view_menu):
+        self.render_panel = QWidget()
+        form = QFormLayout(self.render_panel)
+        self.resolution = QComboBox()
+        self.resolution.addItem("1920 × 1080 (640 × 1080 per column)", [640, 1080])
+        self.resolution.addItem("3840 × 2160 (1280 × 2160 per column)", [1280, 2160])
+        self.frame_rate = QComboBox()
+        for label, value in [
+            ("23.976", "24000/1001"),
+            ("24", "24"),
+            ("25", "25"),
+            ("29.97", "30000/1001"),
+            ("30", "30"),
+            ("60", "60"),
+        ]:
+            self.frame_rate.addItem(label, value)
+        self.encoder = QComboBox()
+        self.encoder.addItem("NVIDIA HEVC · 10-bit", "hevc_nvenc")
+        self.encoder.addItem("NVIDIA H.264 · 8-bit", "h264_nvenc")
+        self.encoder.addItem("CPU H.264 · 8-bit", "libx264")
+        self.speed = QComboBox()
+        for value in ("fast", "balanced", "quality"):
+            self.speed.addItem(value.title(), value)
+        self.quality = QSpinBox()
+        self.quality.setRange(1, 51)
+        self.combine = QCheckBox("Also render the final three-column video")
+        saved = RenderConfig()
+        if self.settings.contains("render/config"):
+            saved = RenderConfig(**json.loads(self.settings.value("render/config")))
+        self.resolution.setCurrentIndex(
+            self.resolution.findData([saved.column_width, saved.height])
+        )
+        self.frame_rate.setCurrentIndex(self.frame_rate.findData(saved.fps))
+        self.encoder.setCurrentIndex(self.encoder.findData(saved.encoder))
+        self.speed.setCurrentIndex(self.speed.findData(saved.speed))
+        self.quality.setValue(saved.quality)
+        self.combine.setChecked(self.settings.value("render/combine", True, type=bool))
+        for title, widget in [
+            ("Output size", self.resolution),
+            ("Frames / second", self.frame_rate),
+            ("Encoder", self.encoder),
+            ("Speed / quality", self.speed),
+            ("Quality value", self.quality),
+        ]:
+            form.addRow(title, widget)
+            widget.setAccessibleName(title)
+        form.addRow(self.combine)
+        self.config_dock = QDockWidget("Render Settings", self.window)
+        self.config_dock.setObjectName("sharedRenderConfiguration")
+        self.config_dock.setWidget(self.render_panel)
+        self.window.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self.config_dock
+        )
+        view_menu.addAction(self.config_dock.toggleViewAction())
+        for combo in (self.resolution, self.frame_rate, self.encoder, self.speed):
+            combo.currentIndexChanged.connect(self.render_settings_changed)
+        self.quality.valueChanged.connect(self.render_settings_changed)
+        self.combine.toggled.connect(self.render_settings_changed)
+
+    def build_audio_settings(self, view_menu):
+        self.audio_panel = QWidget()
+        layout = QVBoxLayout(self.audio_panel)
+        codec_form = QFormLayout()
+        self.audio_codec = QComboBox()
+        for label, value in (
+            ("AAC", "aac"),
+            ("MP3", "libmp3lame"),
+            ("AC-3", "ac3"),
+            ("E-AC-3", "eac3"),
+        ):
+            self.audio_codec.addItem(label, value)
+        self.audio_codec.setAccessibleName("Audio codec")
+        self.audio_codec.setCurrentIndex(
+            self.audio_codec.findData(self.settings.value("audio/codec", "aac"))
+        )
+        codec_form.addRow("Codec", self.audio_codec)
+        layout.addLayout(codec_form)
+        group = QGroupBox("Normalize Audio")
+        form = QFormLayout(group)
+        self.normalization = QComboBox()
+        self.normalization.addItems(["None", "True Peak", "YouTube"])
+        self.normalization.setAccessibleName("Normalization mode")
+        self.normalization.setCurrentText(
+            self.settings.value("audio/normalization", "None")
+        )
+        form.addRow("Normalization mode", self.normalization)
+        layout.addWidget(group)
+        layout.addStretch()
+        self.audio_dock = QDockWidget("Audio Settings", self.window)
+        self.audio_dock.setObjectName("audioSettings")
+        self.audio_dock.setWidget(self.audio_panel)
+        self.window.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self.audio_dock
+        )
+        self.window.splitDockWidget(
+            self.config_dock, self.audio_dock, Qt.Orientation.Vertical
+        )
+        view_menu.addAction(self.audio_dock.toggleViewAction())
+        self.normalization.currentTextChanged.connect(self.audio_settings_changed)
+        self.audio_codec.currentIndexChanged.connect(self.audio_settings_changed)
+        self.audio_settings_changed()
+
+    def audio_settings_changed(self):
+        mode = self.normalization.currentText()
+        self.settings.setValue("audio/normalization", mode)
+        self.settings.setValue("audio/codec", self.audio_codec.currentData())
+
+    def render_config(self):
+        width, height = self.resolution.currentData()
+        return RenderConfig(
+            width,
+            height,
+            self.frame_rate.currentData(),
+            self.encoder.currentData(),
+            self.speed.currentData(),
+            self.quality.value(),
+            self.normalization.currentText(),
+            self.audio_codec.currentData(),
+        )
+
+    def render_settings_changed(self):
+        self.settings.setValue(
+            "render/config", json.dumps(asdict(self.render_config()))
+        )
+        self.settings.setValue("render/combine", self.combine.isChecked())
+        self.refresh()
 
     def apply_appearance(self):
         app = QApplication.instance()
@@ -329,8 +473,6 @@ class Application(QObject):
             [
                 "-v",
                 "error",
-                "-select_streams",
-                "v:0",
                 "-show_streams",
                 "-show_format",
                 "-of",
@@ -353,12 +495,25 @@ class Application(QObject):
         self.tracks = [[], [], []]
         self.refresh()
 
-    def rebalance(self):
-        self.tracks = balance(self.clips)
+    def rebalance(self, mixed=False):
+        self.tracks = balance(self.clips, mixed=mixed)
         self.refresh()
         self.window.statusBar().showMessage("Ready")
 
     def refresh(self):
+        config = self.render_config()
+        for index, label in enumerate(self.column_headers):
+            label.setText(
+                f"{index + 1} · {COLUMN_NAMES[index]}\n⅓ of output · {config.column_width} × {config.height}"
+            )
+        self.output_info.setText(
+            f"MP4 · {self.encoder.currentText()} · {config.column_width * 3} × {config.height} · {self.frame_rate.currentText()} fps"
+        )
+        self.export_button.setText(
+            "Render columns + final video…"
+            if self.combine.isChecked()
+            else "Render three column videos…"
+        )
         self.library.clear()
         for clip in self.clips:
             eligibility = "Portrait" if clip.portrait else "Excluded: not portrait"
@@ -481,8 +636,11 @@ class Application(QObject):
         for widget in (self.open_button, self.open_action, self.clear_action):
             widget.setEnabled(idle)
         self.balance_button.setEnabled(idle and bool(self.clips))
+        self.mixed_button.setEnabled(idle and bool(self.clips))
         self.export_button.setEnabled(idle and all(self.tracks))
         self.stop_button.setEnabled(self.running)
+        self.render_panel.setEnabled(idle)
+        self.audio_panel.setEnabled(idle)
         for listing in self.lists:
             listing.setEnabled(idle)
         column = self.active_column
@@ -505,21 +663,103 @@ class Application(QObject):
             self.start_export(Path(filename))
 
     def start_export(self, output):
+        columns = [
+            output.with_name(f"{output.stem}_{name}.mp4") for name in ("A", "B", "C")
+        ]
+        targets = columns + ([output] if self.combine.isChecked() else [])
+        existing = [path for path in targets if path.exists()]
+        if existing:
+            QMessageBox.critical(
+                self.window,
+                "Output files already exist",
+                "Rendering was not started. Move or delete these files, or choose a different output name:\n\n"
+                + "\n".join(str(path) for path in existing),
+            )
+            return
         self.output = output
         self.export_directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-")
-        args = export_arguments(
-            self.tracks,
-            output,
-            Path(self.export_directory.name) / "composition.ffgraph",
-        )
+        graph_root = Path(self.export_directory.name)
+        config = self.render_config()
+        self.export_jobs = []
+        self.measurement_keys = {}
+        self.audio_peaks = {}
+        durations = [
+            sum(clip_duration(clip, config) for clip in track) for track in self.tracks
+        ]
+        if config.normalization == "True Peak":
+            audio_clips = {
+                clip.path: clip
+                for track in self.tracks
+                for clip in track
+                if clip.has_audio
+            }
+            for path, clip in audio_clips.items():
+                self.measurement_keys[len(self.export_jobs)] = path
+                self.export_jobs.append(
+                    (path, clip.duration, peak_measurement_arguments(clip))
+                )
+        for index, (track, path) in enumerate(zip(self.tracks, columns)):
+            self.export_jobs.extend(
+                column_jobs(
+                    track,
+                    path,
+                    graph_root / f"column{index}.ffconcat",
+                    config,
+                    self.audio_peaks,
+                )
+            )
+        if self.combine.isChecked():
+            if config.normalization == "True Peak":
+                self.measurement_keys[len(self.export_jobs)] = output
+                self.export_jobs.append(
+                    (
+                        output,
+                        max(durations),
+                        mix_peak_arguments(columns, max(durations)),
+                    )
+                )
+            args = partial(
+                composition_arguments,
+                columns,
+                max(durations),
+                output,
+                graph_root / "composition.ffgraph",
+                config,
+            )
+            self.export_jobs.append((output, max(durations), args))
+        self.export_index = 0
+        self.stop_requested = False
         self.progress_buffer = ""
         self.progress.setValue(0)
         self.log.clear()
         self.log_dock.show()
         self.running = True
         self.update_enabled()
-        self.window.statusBar().showMessage(f"Rendering {output.name}")
+        self.start_export_job()
+
+    def start_export_job(self):
+        path, self.stage_duration, args = self.export_jobs[self.export_index]
+        measuring = self.export_index in self.measurement_keys
+        if callable(args):
+            if (
+                args.func is composition_arguments
+                and self.render_config().normalization == "True Peak"
+            ):
+                args = args(peak=self.audio_peaks[path])
+            else:
+                args = args()
+        self.progress_buffer = ""
+        self.stage_log = ""
+        operation = "Measuring audio" if measuring else "Rendering"
+        self.window.statusBar().showMessage(
+            f"{operation} {self.export_index + 1}/{len(self.export_jobs)} · {path.name}"
+        )
+        self.log.appendPlainText(f"{operation} {path}\n")
         self.process.start(self.ffmpeg, args)
+
+    def stop_export(self):
+        self.stop_requested = True
+        self.process.write(b"q\n")
 
     def read_progress(self):
         self.progress_buffer += bytes(self.process.readAllStandardOutput()).decode()
@@ -528,19 +768,47 @@ class Application(QObject):
             if line.startswith("out_time_us=") and line[12:] != "N/A":
                 seconds = int(line[12:]) / 1_000_000
                 self.progress.setValue(
-                    round(seconds / max(track_durations(self.tracks)) * 1000)
+                    round(
+                        (self.export_index + min(1, seconds / self.stage_duration))
+                        / len(self.export_jobs)
+                        * 1000
+                    )
                 )
 
     def read_log(self):
-        self.log.appendPlainText(bytes(self.process.readAllStandardError()).decode())
+        text = bytes(self.process.readAllStandardError()).decode()
+        self.stage_log += text
+        self.log.appendPlainText(text)
 
     def finished(self, exit_code, exit_status):
         self.read_log()
+        self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
+        if (
+            exit_code == 0
+            and not self.stop_requested
+            and self.export_index in self.measurement_keys
+        ):
+            measured = json.loads(
+                self.stage_log[
+                    self.stage_log.rindex("{") : self.stage_log.rindex("}") + 1
+                ]
+            )
+            self.audio_peaks[self.measurement_keys[self.export_index]] = float(
+                measured["input_tp"]
+            )
+        if (
+            exit_code == 0
+            and not self.stop_requested
+            and self.export_index + 1 < len(self.export_jobs)
+        ):
+            self.export_index += 1
+            self.start_export_job()
+            return
         self.running = False
         self.export_directory.cleanup()
         self.export_directory = None
         self.window.statusBar().showMessage(
-            f"FFmpeg exited with code {exit_code} · {self.output}"
+            f"FFmpeg exited with code {exit_code} · {self.export_jobs[self.export_index][0]}"
         )
         self.update_enabled()
 
