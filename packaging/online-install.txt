@@ -1,0 +1,6 @@
+This online installer needs an Internet connection to download uv, Python 3.13.12, Qt/PySide6, the locked Python dependencies, and FFmpeg.
+
+Runtime files are installed privately below the selected application folder. The uv and FFmpeg download archives are cached in %LOCALAPPDATA%\FastVideoAssembly\Cache\downloads and reused by later installs and updates when their pinned hashes match. The cache is retained after uninstall and may be deleted to reclaim space. No administrator privileges or preinstalled Python are required. First-install downloads require several hundred megabytes; the installed application is larger than this Setup file.
+
+After installation, playback and export work offline. The installer is unsigned.
+

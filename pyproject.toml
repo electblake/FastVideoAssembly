@@ -1,0 +1,27 @@
+[project]
+name = "fastvideoassembly"
+version = "0.1.0"
+description = "Assemble portrait videos into three balanced side-by-side timelines"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "PySide6>=6.8,<7",
+    "pyqtgraph>=0.13.7,<0.15",
+    "platformdirs>=4",
+    "qt-themes>=0.4.1,<0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.gui-scripts]
+fastvideoassembly = "fastvideoassembly.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-qt>=4.4", "ruff>=0.9"]
+
+[tool.pytest.ini_options]
+qt_api = "pyside6"

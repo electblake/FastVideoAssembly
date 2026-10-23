@@ -1,0 +1,28 @@
+/* Component sizing and typography only. Colours and states belong to the Qt theme. */
+QPushButton[variant="primary"] {
+    padding: 6px 12px;
+    font-weight: 600;
+}
+
+/* Point sizes are derived from the application font (the rem equivalent).
+   Content heights account for the native frame to give the total tier height. */
+QPushButton[buttonSize="medium"] {
+    font-size: ${medium_font_size}pt;
+    padding: 0px 12px;
+    min-height: ${medium_height}px;
+    max-height: ${medium_height}px;
+}
+
+QPushButton[buttonSize="large"] {
+    font-size: ${large_font_size}pt;
+    padding: 0px 12px;
+    min-height: ${large_height}px;
+    max-height: ${large_height}px;
+}
+
+QPushButton[buttonSize="xlarge"] {
+    font-size: ${xlarge_font_size}pt;
+    padding: 0px 12px;
+    min-height: ${xlarge_height}px;
+    max-height: ${xlarge_height}px;
+}

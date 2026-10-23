@@ -1,0 +1,10 @@
+{
+  "version": "3.13.12",
+  "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260325/cpython-3.13.12%2B20260325-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+  "sha256": "34bb9427d022c2810387e1376c6e184d3f3fdd0984b28519ac58295b0ba1adde",
+  "download_size": 21724944,
+  "extracted_size": 62102455,
+  "tar_sha256": "a229aded462492f75cc72c2b016a4ffb7d90ba793b848c6d030cbc00a590022f",
+  "tar_size": 64659968
+}
+
