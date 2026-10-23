@@ -61,8 +61,8 @@ def clip_from_probe(path, metadata):
     )
 
 
-def balance(clips, mixed=False):
-    """Balance track totals, then order ascending or alternate long/short clips."""
+def balance(clips, longest_first=False):
+    """Balance track totals, then sort clips by duration in the requested direction."""
     tracks = [[], [], []]
     durations = [0.0, 0.0, 0.0]
     for clip in sorted(
@@ -73,16 +73,12 @@ def balance(clips, mixed=False):
         tracks[index].append(clip)
         durations[index] += clip.duration
     for track in tracks:
-        track.sort(key=lambda clip: (clip.duration, str(clip.path)))
-        if mixed:
-            remaining = list(track)
-            track.clear()
-            # Pair opposite duration ranks so short and long clips are spread
-            # through the timeline instead of forming separate runs.
-            while remaining:
-                track.append(remaining.pop())
-                if remaining:
-                    track.append(remaining.pop(0))
+        track.sort(
+            key=lambda clip: (
+                -clip.duration if longest_first else clip.duration,
+                str(clip.path),
+            )
+        )
     return tracks
 
 

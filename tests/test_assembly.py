@@ -31,31 +31,19 @@ def test_balanced_tracks_keep_every_portrait_once_and_ascending():
     )
 
 
-def test_mixed_order_spreads_lengths_without_changing_track_totals():
-    clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 19)]
+def test_longest_first_preserves_track_membership_and_totals():
+    clips = [
+        Clip(Path(f"{n}.mp4"), n, 90, 160) for n in [1, 1, 3, 5, 8, 40, 600, 1200, 1975]
+    ]
     ascending = balance(clips)
-    mixed = balance(clips, mixed=True)
-    assert track_durations(mixed) == track_durations(ascending)
-    for original, ordered in zip(ascending, mixed):
-        assert set(ordered) == set(original)
-        assert len(ordered) == len(original)
+    descending = balance(clips, longest_first=True)
+    assert track_durations(descending) == track_durations(ascending)
+    for original, ordered in zip(ascending, descending):
+        assert sorted(c.path for c in ordered) == sorted(c.path for c in original)
         durations = [clip.duration for clip in ordered]
-        assert all(
-            durations[i] > durations[i + 1] for i in range(0, len(durations) - 1, 2)
-        )
-        assert all(
-            durations[i] < durations[i + 1] for i in range(1, len(durations) - 1, 2)
-        )
-        # Adjacent long/short pairs cover similar amounts of playback time.
-        pairs = [sum(durations[i : i + 2]) for i in range(0, len(durations), 2)]
-        assert max(pairs) - min(pairs) <= 2
-    assert balance(clips, mixed=True) == mixed
-
-
-def test_mixed_order_keeps_odd_and_empty_tracks():
-    clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 10)]
-    assert sum(map(len, balance(clips, mixed=True))) == 9
-    assert balance([], mixed=True) == [[], [], []]
+        assert durations == sorted(durations, reverse=True)
+    assert balance(clips, longest_first=True) == descending
+    assert balance([], longest_first=True) == [[], [], []]
 
 
 def test_metadata_uses_rotation_and_pixel_aspect_ratio():
@@ -388,6 +376,7 @@ def test_gui_import_and_full_resolution_export(
     assert controller.export_button.isEnabled()
     output = tmp_path / "gui-output.mp4"
     controller.start_export(output)
+    output = controller.output
     assert not controller.balance_button.isEnabled()
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0

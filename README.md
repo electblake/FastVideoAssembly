@@ -24,14 +24,22 @@ aspect ratio are considered. Longest clips are allocated to the currently
 shortest column, then each column is sorted shortest to longest. This is a
 duration-balancing heuristic, not a promise of an optimal equal partition.
 
-The central timeline uses a shared seconds axis and duration-scaled blocks.
+The central timeline uses a shared seconds axis and duration-scaled blocks,
+including the same output-frame rounding used by rendering.
 Click a block or list entry to select it. Move earlier/later changes playback
 order; move left/right transfers the clip to the end of an adjacent column.
-**Shortest to Longest** restores ascending clip lengths. **Balanced** alternates
-the longest remaining clip with the shortest remaining clip within each column,
-mixing long and short clips throughout playback. Both buttons first redistribute
-all eligible source clips to keep the three column totals similar; ordering does
-not change those totals. Double-click a clip to open its source.
+**Shortest First** sorts clips by ascending duration; **Longest First** sorts
+by descending duration. Both buttons first redistribute all eligible source clips
+to keep the three column totals similar; ordering does not change those totals.
+The former Balanced ordering has been removed because alternating duration ranks
+did not distribute clip lengths evenly over playback time.
+Double-click a clip to open its source.
+Selecting a source, central column-list entry, or timeline segment shares one
+selection across these views. The dockable **Preview** above Render Settings
+shows the selected source with Play/Pause, Stop, and a scrubber.
+**Remove Selected Clip** removes the source and its timeline entries from the
+assembly without deleting the file or reordering other clips. Use either sorting
+button when you want to redistribute the remaining clips.
 All three columns must contain a clip before rendering is enabled.
 
 The **Render Settings** dock controls output dimensions (1080p or
@@ -73,8 +81,16 @@ References: [FFmpeg loudnorm](https://www.ffmpeg.org/ffmpeg-filters.html#loudnor
 and Blackmagic Design's [Resolve 20 Colorist Guide](https://documents.blackmagicdesign.com/UserManuals/DaVinci-Resolve-20-Colorist-Guide.pdf),
 which documents the YouTube preset as −14 LKFS and −1 dBTP.
 
-Rendering `assembly.mp4` first produces `assembly_A.mp4`,
-`assembly_B.mp4`, and `assembly_C.mp4`, sequentially. These playable
+**Output Settings**, docked below Audio Settings, contains Project, Name format,
+and Output folder (with Browse). Project defaults to the first source folder's
+name and can be edited. The default format is `{project}.Assembly.{date}.mp4`;
+`{date}` uses `YYYY-MM-DD` on the day export starts. These settings are saved.
+Export uses them directly without a filename or save-location dialog. An empty
+output folder stops export and displays an error in the status bar.
+
+For example, project `Holiday` on 2026-10-23 produces
+`Holiday.Assembly.2026-10-23_A.mp4`, `_B.mp4`, and `_C.mp4` sequentially,
+then `Holiday.Assembly.2026-10-23_FINAL.mp4` when combining is enabled. These playable
 column cuts retain their natural durations and stay beside the final output.
 Uncheck **Also render the final three-column video** to produce only these files.
 When checked, a final pass stacks the columns, inheriting the render settings
@@ -89,7 +105,11 @@ Stop rendering sends FFmpeg its normal quit command, retains completed and
 partial files, and does not start later stages. Process diagnostics and exit
 codes remain visible. Each column renders one source clip at a time into
 temporary MOV files, then
-joins them sequentially with video stream copy and a single AAC audio encode.
+joins them sequentially with video stream copy and one audio encode using the selected codec.
+Each clip is measured (when True Peak is selected), then immediately rendered.
+A is completed and saved before any processing of B begins, followed by C.
+Temporary clip files are deleted as soon as their column is saved; completed
+A/B/C outputs remain available if a later stage fails or is stopped.
 Temporary PCM audio avoids per-clip AAC gaps. Cuts align to output frames; a
 partial frame extends to the next frame boundary. The final composite opens only
 A/B/C. Temporary files are removed when rendering ends or is stopped; allow disk

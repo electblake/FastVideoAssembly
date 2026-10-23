@@ -207,6 +207,7 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
     controller.tracks = [[clip], [clip], [clip]]
     gui_output = tmp_path / "queued.mp4"
     controller.start_export(gui_output)
+    gui_output = controller.output
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0, controller.log.toPlainText()
     result = measure(gui_output)
