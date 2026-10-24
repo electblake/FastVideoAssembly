@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added regression checks that shared test defaults skip settings access and window activation, while persistence tests remain minimized with temporary profiles.
+- Documented no-profile, minimized launch requirements for new tests and manual smoke tests.
+
 ## [0.7.2] - 2026-10-24
 
 ### Added

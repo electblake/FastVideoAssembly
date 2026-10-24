@@ -10,6 +10,39 @@ from PySide6.QtCore import QSettings, Qt
 from fastvideoassembly import app, installed
 
 
+def test_shared_test_defaults_skip_settings_and_window_activation(qtbot, monkeypatch, tmp_path):
+    settings = Mock()
+    monkeypatch.setattr(app, "QSettings", settings)
+    controller = app.Application()
+    qtbot.addWidget(controller.window)
+    controller.window.show()
+    assert controller.window.isMinimized()
+    assert controller.window.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert not controller.window.isActiveWindow()
+    controller.project_name.setText("Unsaved test project")
+    controller.save_active_state()
+    controller.window.close()
+    settings.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.profile
+def test_profile_tests_stay_minimized_and_use_temporary_settings(qtbot, tmp_path):
+    controller = app.Application()
+    qtbot.addWidget(controller.window)
+    controller.window.show()
+    assert controller.window.isMinimized()
+    assert controller.window.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    assert not controller.window.isActiveWindow()
+    assert controller.settings.fileName() == (tmp_path / "settings.ini").as_posix()
+    controller.project_name.setText("Isolated persistence test")
+    controller.window.close()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.project_name.text() == "Isolated persistence test"
+    restored.window.close()
+
+
 @pytest.mark.parametrize("saved_profile", [False, True])
 def test_no_profile_leaves_user_settings_untouched(qtbot, tmp_path, monkeypatch, saved_profile):
     monkeypatch.setattr(app, "user_config_path", lambda *args, **kwargs: tmp_path)

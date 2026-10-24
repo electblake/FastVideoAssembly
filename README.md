@@ -248,4 +248,15 @@ uv run pytest
 uv run ruff check .
 ```
 
+The shared pytest fixture applies the equivalents of `-NoProfile -Minimize` to
+application instances, including render and audio regression tests. Leave those
+defaults enabled in new tests. Tests that exercise persistence use
+`@pytest.mark.profile`; their settings stay in the test's temporary directory and
+their windows remain minimized. Only tests of launch modes explicitly override
+these options.
+
+Use `uv run fastvideoassembly -NoProfile -Minimize` for manual smoke tests and pass
+both flags when launching either application entry point from a test subprocess.
+Flags are consumed by the application, not by pytest or FFmpeg.
+
 See [Windows installer](packaging/README.md).
