@@ -96,8 +96,18 @@ remain fixed when importing videos. Defaults target the verified RTX 3090:
 NVIDIA HEVC Main 10, Balanced/P4, CQ 20, 1920×1080 at 30 fps. NVIDIA H.264 and
 CPU H.264 are explicit alternatives, never automatic substitutes. Lower quality
 values produce larger, higher-quality files; NVENC CQ and CPU CRF are different
-scales. Decoding, scaling, cropping and stacking currently run on the CPU;
-NVENC accelerates encoding. No throughput optimum is claimed from the smoke test.
+scales. **Video decoding** offers CPU, NVIDIA NVDEC, Intel Quick Sync,
+Windows D3D11 and DXVA2 according to installed GPU vendors and FFmpeg capabilities.
+**Video scaling** offers CPU, NVIDIA CUDA and Intel Quick Sync. CPU and CUDA
+scaling expose Nearest, Bilinear, Bicubic and Lanczos interpolation; Quick Sync
+exposes Low Power and High Quality scaling. Decoding and scaling default to CPU.
+Codec support still depends on the selected GPU and source format; selections
+are explicit and render failures are reported without changing backends.
+Cropping, frame-rate conversion, padding, concatenation and final stacking remain
+on the CPU. GPU frames are downloaded for those operations, so acceleration is
+not a guarantee of faster rendering. Hardware decoding also applies to the final
+assembly pass. CPU filter thread edits take effect only after **Apply**; **Reset**
+restores the last applied count.
 
 Clips scale proportionally to cover the entire column and are center-cropped to
 exact dimensions, without stretching or padding. Square pixels, frame rate and

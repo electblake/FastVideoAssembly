@@ -1007,11 +1007,30 @@ def test_audio_dock_modes_persistence_and_busy_state(controller, qtbot):
     controller.running = False
 
 
-def test_cpu_performance_settings_persist(controller, qtbot):
+def test_cpu_performance_settings_persist(controller, qtbot, monkeypatch):
     assert controller.filter_threads.value() == 4
     assert controller.analysis_workers.value() == 2
     assert not controller.analysis_workers.isEnabled()
+    refresh = Mock()
+    monkeypatch.setattr(controller, "refresh", refresh)
     controller.filter_threads.setValue(8)
+    refresh.assert_not_called()
+    assert controller.render_config().filter_threads == 4
+    controller.quality.setValue(21)
+    assert controller.settings.value("render/filter_threads", type=int) == 4
+    refresh.reset_mock()
+    controller.reset_filter_threads_button.click()
+    assert controller.filter_threads.value() == 4
+    refresh.assert_not_called()
+    controller.filter_threads.setValue(8)
+    controller.apply_filter_threads_button.click()
+    refresh.assert_called_once()
+    assert controller.render_config().filter_threads == 8
+    refresh.reset_mock()
+    controller.filter_threads.setValue(12)
+    controller.reset_filter_threads_button.click()
+    assert controller.filter_threads.value() == 8
+    refresh.assert_not_called()
     controller.normalization.setCurrentText("True Peak")
     assert controller.analysis_workers.isEnabled()
     controller.analysis_workers.setValue(3)
@@ -1386,6 +1405,7 @@ def test_render_settings_use_typed_ini_values(controller, qtbot):
     controller.encoder.setCurrentIndex(controller.encoder.findData("libx264"))
     controller.quality.setValue(17)
     controller.filter_threads.setValue(6)
+    controller.apply_filter_threads_button.click()
     controller.settings.sync()
     restored = app.Application()
     qtbot.addWidget(restored.window)
@@ -1394,6 +1414,59 @@ def test_render_settings_use_typed_ini_values(controller, qtbot):
     assert restored.settings.value("render/quality", type=int) == 17
     assert restored.settings.value("render/filter_threads", type=int) == 6
     assert Path(restored.settings.fileName()).suffix == ".ini"
+
+
+def test_hardware_render_settings_persist_and_control_scaling_options(controller, qtbot, monkeypatch):
+    monkeypatch.setattr(app, "render_hardware", lambda ffmpeg: (
+        [("CPU", "none"), ("NVIDIA NVDEC", "cuda"), ("Intel Quick Sync", "qsv")],
+        [("CPU", "cpu"), ("NVIDIA CUDA", "cuda"), ("Intel Quick Sync", "qsv")],
+    ))
+    configured = app.Application()
+    qtbot.addWidget(configured.window)
+    assert configured.render_config().decoder == "none"
+    assert configured.render_config().scaler == "cpu"
+    assert configured.scaling_algorithm.isEnabled()
+    assert not configured.qsv_scaling_mode.isEnabled()
+    configured.decoder.setCurrentIndex(configured.decoder.findData("cuda"))
+    configured.scaler.setCurrentIndex(configured.scaler.findData("qsv"))
+    assert not configured.scaling_algorithm.isEnabled()
+    assert configured.qsv_scaling_mode.isEnabled()
+    configured.qsv_scaling_mode.setCurrentIndex(configured.qsv_scaling_mode.findData("low_power"))
+    configured.scaler.setCurrentIndex(configured.scaler.findData("cuda"))
+    assert configured.scaling_algorithm.isEnabled()
+    assert not configured.qsv_scaling_mode.isEnabled()
+    configured.scaling_algorithm.setCurrentIndex(configured.scaling_algorithm.findData("lanczos"))
+    configured.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.render_config() == configured.render_config()
+    assert restored.render_config().decoder == "cuda"
+    assert restored.render_config().scaler == "cuda"
+    assert restored.render_config().scaling_algorithm == "lanczos"
+    assert restored.render_config().qsv_scaling_mode == "low_power"
+
+
+def test_unavailable_saved_hardware_remains_selected_until_user_changes_it(controller, qtbot, monkeypatch):
+    controller.settings.setValue("render/decoder", "cuda")
+    controller.settings.setValue("render/scaler", "qsv")
+    controller.settings.sync()
+    monkeypatch.setattr(app, "render_hardware", lambda ffmpeg: (
+        [("CPU", "none")], [("CPU", "cpu")],
+    ))
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.decoder.currentText() == "NVIDIA NVDEC (unavailable)"
+    assert restored.scaler.currentText() == "Intel Quick Sync (unavailable)"
+    assert not restored.decoder.model().item(restored.decoder.currentIndex()).isEnabled()
+    restored.quality.setValue(23)
+    assert restored.render_config().decoder == "cuda"
+    assert restored.render_config().scaler == "qsv"
+    assert restored.settings.value("render/decoder") == "cuda"
+    assert restored.settings.value("render/scaler") == "qsv"
+    restored.decoder.setCurrentIndex(restored.decoder.findData("none"))
+    restored.scaler.setCurrentIndex(restored.scaler.findData("cpu"))
+    assert restored.render_config().decoder == "none"
+    assert restored.render_config().scaler == "cpu"
 
 
 @pytest.mark.parametrize("exit_action", [False, True])

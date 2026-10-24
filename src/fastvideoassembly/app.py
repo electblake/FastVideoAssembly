@@ -65,6 +65,7 @@ from .assembly import (
     video_paths,
 )
 from .audio import mix_peak_arguments, peak_measurement_arguments
+from .hardware import render_hardware
 from .preview import Preview
 from .styles.timeline import TimelineClipStyle, TimelineTrackStyle
 from .three_column import ThreeColumnAssembly, TimelineSegment
@@ -327,10 +328,32 @@ class Application(QObject):
         self.encoder.addItem("NVIDIA H.264 - 8-bit", "h264_nvenc")
         self.encoder.addItem("CPU H.264 - 8-bit", "libx264")
         self.speed = QComboBox()
-        for value in ("fast", "balanced", "quality"):
-            self.speed.addItem(value.title(), value)
+        for label, value in (
+            ("Fastest", "fastest"),
+            ("Faster", "fast"),
+            ("Fast", "fast_medium"),
+            ("Balanced", "balanced"),
+            ("Slow", "slow"),
+            ("Slower", "quality"),
+            ("Slowest", "slowest"),
+        ):
+            self.speed.addItem(label, value)
         self.quality = QSpinBox()
         self.quality.setRange(1, 51)
+        decoders, scalers = render_hardware(self.ffmpeg)
+        self.decoder = QComboBox()
+        for label, value in decoders:
+            self.decoder.addItem(label, value)
+        self.decoder.setToolTip("Supported source codecs depend on the selected GPU.")
+        self.scaler = QComboBox()
+        for label, value in scalers:
+            self.scaler.addItem(label, value)
+        self.scaling_algorithm = QComboBox()
+        for value in ("nearest", "bilinear", "bicubic", "lanczos"):
+            self.scaling_algorithm.addItem(value.title(), value)
+        self.qsv_scaling_mode = QComboBox()
+        self.qsv_scaling_mode.addItem("Low Power", "low_power")
+        self.qsv_scaling_mode.addItem("High Quality", "hq")
         self.combine = QCheckBox("Create final assembly")
         self.settings.remove("render/config")
         saved = RenderConfig(**{
@@ -344,9 +367,28 @@ class Application(QObject):
         self.encoder.setCurrentIndex(self.encoder.findData(saved.encoder))
         self.speed.setCurrentIndex(self.speed.findData(saved.speed))
         self.quality.setValue(saved.quality)
+        for combo, value, labels in (
+            (self.decoder, saved.decoder, {
+                "none": "CPU", "cuda": "NVIDIA NVDEC", "qsv": "Intel Quick Sync",
+                "d3d11va": "Windows D3D11", "dxva2": "Windows DXVA2",
+            }),
+            (self.scaler, saved.scaler, {
+                "cpu": "CPU", "cuda": "NVIDIA CUDA", "qsv": "Intel Quick Sync",
+            }),
+        ):
+            if combo.findData(value) == -1:
+                combo.addItem(f"{labels[value]} (unavailable)", value)
+                combo.model().item(combo.count() - 1).setEnabled(False)
+        self.decoder.setCurrentIndex(self.decoder.findData(saved.decoder))
+        self.scaler.setCurrentIndex(self.scaler.findData(saved.scaler))
+        self.scaling_algorithm.setCurrentIndex(self.scaling_algorithm.findData(saved.scaling_algorithm))
+        self.qsv_scaling_mode.setCurrentIndex(self.qsv_scaling_mode.findData(saved.qsv_scaling_mode))
+        self.scaling_algorithm.setEnabled(saved.scaler in ("cpu", "cuda"))
+        self.qsv_scaling_mode.setEnabled(saved.scaler == "qsv")
         self.filter_threads = QSpinBox()
         self.filter_threads.setRange(1, 256)
         self.filter_threads.setValue(saved.filter_threads)
+        self.applied_filter_threads = saved.filter_threads
         self.filter_threads.setToolTip("CPU threads for video and audio filter graphs per render job.")
         self.combine.setChecked(self.settings.value("render/combine", True, type=bool))
         for title, widget in [
@@ -355,10 +397,25 @@ class Application(QObject):
             ("Encoder", self.encoder),
             ("Speed / quality", self.speed),
             ("Quality value", self.quality),
-            ("CPU filter threads", self.filter_threads),
+            ("Video decoding", self.decoder),
+            ("Video scaling", self.scaler),
+            ("Scaling interpolation", self.scaling_algorithm),
+            ("Quick Sync scaling", self.qsv_scaling_mode),
         ]:
             form.addRow(title, widget)
             widget.setAccessibleName(title)
+        self.filter_threads.setAccessibleName("CPU filter threads")
+        filter_threads_row = QHBoxLayout()
+        filter_threads_row.addWidget(self.filter_threads)
+        self.apply_filter_threads_button = QPushButton("Apply")
+        self.apply_filter_threads_button.clicked.connect(self.apply_filter_threads)
+        filter_threads_row.addWidget(self.apply_filter_threads_button)
+        self.reset_filter_threads_button = QPushButton("Reset")
+        self.reset_filter_threads_button.clicked.connect(
+            lambda: self.filter_threads.setValue(self.applied_filter_threads)
+        )
+        filter_threads_row.addWidget(self.reset_filter_threads_button)
+        form.addRow("CPU filter threads", filter_threads_row)
         self.config_dock = QDockWidget("Render Settings", self.window)
         self.config_dock.setObjectName("sharedRenderConfiguration")
         self.config_dock.setWidget(self.render_panel)
@@ -366,10 +423,10 @@ class Application(QObject):
             Qt.DockWidgetArea.RightDockWidgetArea, self.config_dock
         )
         view_menu.addAction(self.config_dock.toggleViewAction())
-        for combo in (self.resolution, self.frame_rate, self.encoder, self.speed):
+        for combo in (self.resolution, self.frame_rate, self.encoder, self.speed,
+                      self.decoder, self.scaler, self.scaling_algorithm, self.qsv_scaling_mode):
             combo.currentIndexChanged.connect(self.render_settings_changed)
         self.quality.valueChanged.connect(self.render_settings_changed)
-        self.filter_threads.valueChanged.connect(self.render_settings_changed)
         self.combine.toggled.connect(
             lambda checked: self.settings.setValue("render/combine", checked)
         )
@@ -529,10 +586,20 @@ class Application(QObject):
             self.quality.value(),
             self.normalization.currentText(),
             self.audio_codec.currentData(),
-            self.filter_threads.value(),
+            self.applied_filter_threads,
+            self.decoder.currentData(),
+            self.scaler.currentData(),
+            self.scaling_algorithm.currentData(),
+            self.qsv_scaling_mode.currentData(),
         )
 
+    def apply_filter_threads(self):
+        self.applied_filter_threads = self.filter_threads.value()
+        self.render_settings_changed()
+
     def render_settings_changed(self):
+        self.scaling_algorithm.setEnabled(self.scaler.currentData() in ("cpu", "cuda"))
+        self.qsv_scaling_mode.setEnabled(self.scaler.currentData() == "qsv")
         for key, value in asdict(self.render_config()).items():
             self.settings.setValue(f"render/{key}", value)
         self.settings.setValue("render/combine", self.combine.isChecked())

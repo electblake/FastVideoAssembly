@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added saved hardware decoding and scaling selectors based on Windows GPU vendors and FFmpeg capabilities, with CPU/CUDA interpolation and Quick Sync scaling modes.
+- Exposed all seven NVENC presets, labeled Fastest through Slowest, with corresponding CPU H.264 presets.
+- Added Apply and Reset beside CPU filter threads, keeping edits pending until explicitly applied.
 - Added independent multi-selection for clips and timelines, selection counts in their control groups, and timeline-local organizing and shuffling.
 - Added contiguous multi-clip moves by dragging or using Forward, Backward, Start, and End.
 - Added Replace files and continue to output-conflict dialogs, allowing replacement of the listed outputs while keeping Cancel as the default.
@@ -35,6 +38,9 @@
 
 ### Fixed
 
+- Preserved saved hardware selections as unavailable when a GPU or FFmpeg capability disappears, preventing blank selectors from overwriting those settings.
+- Made GPU inventory command failures terminate detection instead of silently reporting missing capabilities.
+- Removed redundant hardware-control tooltip text.
 - Calculated drag placement after closing source gaps, with an insertion marker at the actual final block start instead of the old pre-removal boundary.
 - Kept all-timeline organizing within existing tracks instead of redistributing manually arranged clips.
 - Corrected Forward and Backward movement at timeline ends and clipped number labels to their own segments.

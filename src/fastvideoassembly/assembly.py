@@ -106,10 +106,62 @@ class RenderConfig:
     normalization: str = "None"
     audio_codec: str = "aac"
     filter_threads: int = 4
+    decoder: str = "none"
+    scaler: str = "cpu"
+    scaling_algorithm: str = "bicubic"
+    qsv_scaling_mode: str = "hq"
 
     @property
     def pixel_format(self):
         return "yuv420p10le" if self.encoder == "hevc_nvenc" else "yuv420p"
+
+    @property
+    def hardware_pixel_format(self):
+        return "p010le" if self.encoder == "hevc_nvenc" else "nv12"
+
+    def hardware_arguments(self, scaling=False):
+        args = []
+        if self.decoder == "qsv" or (scaling and self.scaler == "qsv"):
+            args += ["-init_hw_device", "qsv=intel:hw,child_device_type=d3d11va"]
+        if scaling and self.scaler != "cpu":
+            if self.scaler == "qsv":
+                device = "intel"
+            else:
+                device = "scaler"
+                args += ["-init_hw_device", "cuda=scaler:0"]
+            args += ["-filter_hw_device", device]
+        return args
+
+    def decoding_arguments(self, scaling=False):
+        args = ["-hwaccel", self.decoder]
+        if self.decoder == "qsv":
+            args += ["-hwaccel_device", "intel", "-hwaccel_output_format", "qsv"]
+        elif self.decoder == "cuda" and scaling and self.scaler == "cuda":
+            args += ["-hwaccel_device", "scaler", "-hwaccel_output_format", "cuda"]
+        return args
+
+    def decoded_frames_filter(self, scaling=False):
+        if self.decoder == "qsv" and not (scaling and self.scaler == "qsv"):
+            return (f"vpp_qsv=format={self.hardware_pixel_format},"
+                    f"hwdownload,format={self.hardware_pixel_format},")
+        return ""
+
+    def scaling_filter(self):
+        width, height = self.column_width, self.height
+        if self.scaler == "cpu":
+            algorithm = {"nearest": "neighbor", "bilinear": "bilinear",
+                         "bicubic": "bicubic", "lanczos": "lanczos"}[self.scaling_algorithm]
+            return (f"scale={width}:{height}:force_original_aspect_ratio=increase:"
+                    f"force_divisible_by=2:reset_sar=1:flags={algorithm},")
+        upload = ""
+        if (self.decoder, self.scaler) not in (("cuda", "cuda"), ("qsv", "qsv")):
+            upload = f"format={self.hardware_pixel_format},hwupload,"
+        dimensions = (f"'ceil(max({width},{height}*dar)/2)*2':"
+                      f"'ceil(max({height},{width}/dar)/2)*2'")
+        options = {"cuda": f":interp_algo={self.scaling_algorithm}",
+                   "qsv": f":mode={self.qsv_scaling_mode}"}[self.scaler]
+        return (f"{upload}scale_{self.scaler}={dimensions}:format={self.hardware_pixel_format}{options},"
+                f"hwdownload,format={self.hardware_pixel_format},setsar=1,")
 
     def encoding_arguments(self):
         args = ["-c:v", self.encoder]
@@ -118,12 +170,26 @@ class RenderConfig:
         else:
             args += ["-c:a", self.audio_codec, "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         if self.encoder == "libx264":
-            preset = {"fast": "veryfast", "balanced": "medium", "quality": "slow"}[
-                self.speed
-            ]
+            preset = {
+                "fastest": "ultrafast",
+                "fast": "veryfast",
+                "fast_medium": "fast",
+                "balanced": "medium",
+                "slow": "slow",
+                "quality": "slower",
+                "slowest": "veryslow",
+            }[self.speed]
             args += ["-preset", preset, "-crf", str(self.quality)]
         else:
-            preset = {"fast": "p2", "balanced": "p4", "quality": "p6"}[self.speed]
+            preset = {
+                "fastest": "p1",
+                "fast": "p2",
+                "fast_medium": "p3",
+                "balanced": "p4",
+                "slow": "p5",
+                "quality": "p6",
+                "slowest": "p7",
+            }[self.speed]
             args += [
                 "-preset",
                 preset,
@@ -159,15 +225,16 @@ def clip_duration(clip, config):
 def column_arguments(track, output, graph_path, config, peaks=None):
     """Encode a complete timeline directly from its original sources."""
     args = ["-hide_banner", "-n", "-filter_complex_threads", str(config.filter_threads)]
+    args += config.hardware_arguments(scaling=True)
     filters = []
     inputs = []
     for index, clip in enumerate(track):
         duration = clip_duration(clip, config)
+        args += config.decoding_arguments(scaling=True)
         args += ["-threads", "1", "-t", str(duration), "-i", str(clip.path)]
         filters.append(
             f"[{index}:v:0]setpts=PTS-STARTPTS,"
-            f"scale={config.column_width}:{config.height}:force_original_aspect_ratio=increase:"
-            "force_divisible_by=2:reset_sar=1,"
+            f"{config.decoded_frames_filter(scaling=True)}{config.scaling_filter()}"
             f"crop={config.column_width}:{config.height}:(iw-ow)/2:(ih-oh)/2,"
             f"fps={config.fps}:start_time=0,format={config.pixel_format},setsar=1,"
             f"tpad=stop_mode=clone:stop=-1,trim=duration={duration},"
@@ -207,11 +274,13 @@ def column_arguments(track, output, graph_path, config, peaks=None):
 def composition_arguments(columns, duration, output, graph_path, config, peak=None):
     """Stack already normalized columns; preserve their shared render settings."""
     args = ["-hide_banner", "-n", "-filter_complex_threads", str(config.filter_threads)]
+    args += config.hardware_arguments()
     filters = []
     for index, path in enumerate(columns):
-        args += ["-i", str(path)]
+        args += config.decoding_arguments() + ["-i", str(path)]
         filters.append(
-            f"[{index}:v:0]setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1[column{index}]"
+            f"[{index}:v:0]{config.decoded_frames_filter()}"
+            f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1[column{index}]"
         )
         if config.audio_codec != "none":
             filters.append(f"[{index}:a:0]asetpts=PTS-STARTPTS[audio{index}]")
