@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Sticky clip selections and Sticky timeline selections checkboxes below their button grids, enabled by default, with settings restored across app restarts.
+- Added single-selection behavior when sticky selections are disabled, reducing existing selections to one and replacing it when another item is clicked.
+
 ## [0.7.5] - 2026-10-24
 
 ### Added

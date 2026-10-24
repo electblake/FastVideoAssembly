@@ -2268,6 +2268,73 @@ def test_timeline_drag_disabled_while_busy(controller, tmp_path, busy):
     setattr(controller, busy, False)
 
 
+@pytest.mark.profile
+@pytest.mark.parametrize("clips_sticky, timelines_sticky", [(False, False), (False, True), (True, False), (True, True)])
+def test_sticky_selection_settings_restored(controller, qtbot, clips_sticky, timelines_sticky):
+    controller.assembler.sticky_clip_selections.setChecked(False)
+    controller.assembler.sticky_timeline_selections.setChecked(False)
+    controller.assembler.sticky_clip_selections.setChecked(clips_sticky)
+    controller.assembler.sticky_timeline_selections.setChecked(timelines_sticky)
+    controller.settings.sync()
+    controller.window.close()
+
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.sticky_clip_selections.isChecked() is clips_sticky
+    assert restored.assembler.sticky_timeline_selections.isChecked() is timelines_sticky
+    assert restored.library.selectionMode() == (
+        app.QAbstractItemView.SelectionMode.ExtendedSelection if clips_sticky
+        else app.QAbstractItemView.SelectionMode.SingleSelection
+    )
+
+
+@pytest.mark.parametrize("kind", ["clip", "timeline"])
+def test_sticky_selection_modes(controller, tmp_path, qtbot, kind):
+    assembler = controller.assembler
+    clips = [Clip(tmp_path / f"{i}.mp4", 3, 60, 120) for i in range(3)]
+    controller.clips = clips
+    assembler.tracks = [[clip] for clip in clips]
+    controller.refresh()
+    qtbot.wait(100)
+    checkbox = getattr(assembler, f"sticky_{kind}_selections")
+    assert checkbox.isChecked()
+
+    def click(column):
+        _, start, _, y = assembler.track_bounds[column]
+        position = assembler.timeline.mapFromScene(
+            assembler.timeline.getViewBox().mapViewToScene(
+                QPointF(start + 1, y + (0.43 if kind == "timeline" else 0))
+            )
+        )
+        qtbot.mouseClick(assembler.timeline.viewport(), Qt.MouseButton.LeftButton, pos=position)
+
+    def selection():
+        return (assembler.selected_timelines if kind == "timeline" else
+                {clips.index(clip) for clip in controller.selected_clips})
+
+    click(0)
+    click(1)
+    assert selection() == {0, 1}
+    click(1)
+    assert selection() == {0}
+    click(1)
+    checkbox.setChecked(False)
+    assert len(selection()) == 1
+    click(2)
+    assert selection() == {2}
+    click(2)
+    assert selection() == {2}
+    click(0)
+    assert selection() == {0}
+    if kind == "timeline":
+        assert not assembler.track_backgrounds[2].property("selected")
+    else:
+        assert not assembler.segment_bars[2][1].property("active")
+    checkbox.setChecked(True)
+    click(1)
+    assert selection() == {0, 1}
+
+
 @pytest.mark.parametrize("columns", [3, 4])
 def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns):
     controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))

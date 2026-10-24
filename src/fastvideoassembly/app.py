@@ -240,7 +240,11 @@ class Application(QObject):
         self.library.setAcceptDrops(True)
         self.library.viewport().setAcceptDrops(True)
         self.library.viewport().installEventFilter(self)
-        self.library.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.library.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+            if self.settings.value("assembly/stickyClipSelections", True, type=bool)
+            else QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.library.currentRowChanged.connect(self.select_source)
         self.library.itemSelectionChanged.connect(self.select_source)
         library_layout.addWidget(self.library)
@@ -856,6 +860,22 @@ class Application(QObject):
         self.render_settings_changed()
         self.save_active_state()
 
+    def set_sticky_clip_selections(self, checked):
+        if not checked:
+            self.select_clip(self.selected_clip)
+        self.library.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection if checked
+            else QAbstractItemView.SelectionMode.SingleSelection
+        )
+
+    def set_sticky_timeline_selections(self, checked):
+        if not checked and self.assembler.selected_timelines:
+            column = min(self.assembler.selected_timelines)
+            self.assembler.selected_timelines.intersection_update({column})
+            for index, background in enumerate(self.assembler.track_backgrounds):
+                TimelineTrackStyle.apply(background, index == column)
+            self.update_enabled()
+
     def clear_timeline_selection(self):
         self.assembler.selected_timelines.clear()
         for background in self.assembler.track_backgrounds:
@@ -1070,6 +1090,9 @@ class Application(QObject):
                                 if self.library.item(i).data(Qt.ItemDataRole.UserRole) == clip)
                     self.library.blockSignals(True)
                     selected = not item.isSelected()
+                    if not self.assembler.sticky_clip_selections.isChecked():
+                        self.library.clearSelection()
+                        selected = True
                     self.library.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
                     item.setSelected(selected)
                     self.library.blockSignals(False)
@@ -1078,8 +1101,13 @@ class Application(QObject):
                     return
         for column, start, end, y in self.assembler.track_bounds:
             if start <= point.x() < end and abs(point.y() - y) <= TRACK_HEIGHT / 2:
-                self.assembler.selected_timelines.symmetric_difference_update({column})
-                TimelineTrackStyle.apply(self.assembler.track_backgrounds[column], column in self.assembler.selected_timelines)
+                if self.assembler.sticky_timeline_selections.isChecked():
+                    self.assembler.selected_timelines.symmetric_difference_update({column})
+                else:
+                    self.assembler.selected_timelines.clear()
+                    self.assembler.selected_timelines.add(column)
+                for index, background in enumerate(self.assembler.track_backgrounds):
+                    TimelineTrackStyle.apply(background, index in self.assembler.selected_timelines)
                 self.update_enabled()
                 event.accept()
                 return
