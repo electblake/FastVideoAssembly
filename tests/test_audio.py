@@ -7,7 +7,7 @@ import pytest
 from fastvideoassembly.assembly import (
     Clip,
     RenderConfig,
-    column_jobs,
+    column_arguments,
     composition_arguments,
 )
 from fastvideoassembly.audio import (
@@ -159,16 +159,14 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
         column_width=64, height=120, encoder="libx264", normalization=mode
     )
     column = tmp_path / "column.mp4"
-    jobs = column_jobs(
+    args = column_arguments(
         [Clip(source, 4, 60, 120, True)],
         column,
         tmp_path / "column.txt",
         config,
         {source: peak},
     )
-    for _, _, args in jobs:
-        args = args() if callable(args) else args
-        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     columns = [column] * 3
     measurement = subprocess.run(
         ["ffmpeg", *mix_peak_arguments(columns, 4)],
@@ -207,7 +205,7 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
     controller.assembler.tracks = [[clip], [clip], [clip]]
     gui_output = tmp_path / "queued.mp4"
     controller.start_export(gui_output)
-    gui_output = controller.output
+    gui_output = tmp_path / "queued_FINAL.mp4"
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0, controller.log.toPlainText()
     result = measure(gui_output)

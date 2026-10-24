@@ -9,7 +9,6 @@ from PySide6.QtCore import QSettings
 from . import APP_NAME
 
 APP_MODULE = "fastvideoassembly"
-ICON_NAME = f"{APP_NAME}-blue.ico"
 
 CONTEXTS = (
     (r"Software\Classes\Directory\shell", "%1"),

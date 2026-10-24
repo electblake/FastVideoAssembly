@@ -39,7 +39,7 @@ def test_columns_only_does_not_check_unused_final(controller, tmp_path, monkeypa
     monkeypatch.setattr(controller, "start_export_job", launch)
     controller.start_export(output)
     launch.assert_called_once()
-    assert len(controller.export_jobs) == 6
+    assert len(controller.export_jobs) == 3
     assert final.read_bytes() == b"existing final"
     controller.running = False
     controller.export_directory.cleanup()
@@ -172,6 +172,7 @@ def test_missing_output_folder_stops_in_status_bar(controller, monkeypatch):
 
 
 def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
+    monkeypatch.setattr(controller, "start_measurement_batch", Mock())
     process = Mock()
     monkeypatch.setattr(controller, "process", process)
     clock = [100.0]
@@ -181,18 +182,34 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
     controller.measurement_keys = {0: tmp_path / "audio.mp4"}
     controller.export_index = 0
     controller.start_export_job()
-    assert "ETA --:--:--" in controller.progress.text()
+    assert "Runtime 00:00:00" in controller.progress.text()
+    assert "ETA" not in controller.progress.text()
+    assert "ETA --:--:--" in controller.window.statusBar().currentMessage()
     clock[0] = 110
     process.readAllStandardOutput.return_value = b"out_time_us=50000000\n"
     controller.read_progress()
     assert controller.progress.value() == 250
-    assert "ETA 00:00:30" in controller.progress.text()
+    assert "Runtime 00:00:10" in controller.progress.text()
+    assert "ETA 00:00:30" in controller.window.statusBar().currentMessage()
+    clock[0] = 111
+    controller.runtime_timer.timeout.emit()
+    assert "Runtime 00:00:11" in controller.progress.text()
+    assert controller.progress.value() == 250
     controller.export_index = 1
     controller.start_export_job()
     assert controller.progress.value() == 500
+    assert controller.progress.text().endswith(" - 0.0 frames/s")
     clock[0] = 120
+    process.readAllStandardOutput.return_value = b"fps=147.25\nout_time_us=50000000\n"
     controller.read_progress()
     assert controller.progress.value() == 750
+    assert controller.progress.text().endswith(" - 147.2 frames/s")
+    process.readAllStandardOutput.return_value = b"fps=98."
+    controller.read_progress()
+    assert controller.progress.text().endswith(" - 147.2 frames/s")
+    process.readAllStandardOutput.return_value = b"75\n"
+    controller.read_progress()
+    assert controller.progress.text().endswith(" - 98.8 frames/s")
     process.readAllStandardOutput.return_value = b"out_time_us=0\n"
     controller.read_progress()
     assert controller.progress.value() == 750
@@ -201,7 +218,9 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
         controller.start_export_job()
         assert controller.progress.value() == 0
         assert controller.progress.text().startswith(name)
-        assert "ETA --:--:--" in controller.progress.text()
+        assert "Runtime 00:00:00" in controller.progress.text()
+        assert controller.progress.text().endswith(" - 0.0 frames/s")
+        assert "ETA --:--:--" in controller.window.statusBar().currentMessage()
 
 
 @pytest.mark.parametrize("stopped,exit_code", [(False, 0), (True, 0), (False, 1)])
@@ -226,6 +245,7 @@ def test_progress_completes_only_after_successful_exit(
     assert controller.progress.value() == (1000 if not stopped and exit_code == 0 else 999)
     assert not controller.running
     cleanup.assert_called_once()
+    assert not controller.runtime_timer.isActive()
     assert controller.export_directory is None
     if stopped:
         assert controller.window.statusBar().currentMessage().startswith("Rendering stopped")
@@ -275,7 +295,7 @@ def test_failed_clip_stops_queue_and_removes_temporary_files(
     assert not output.with_name("failed_A.mp4").exists()
 
 
-def test_true_peak_measures_each_clip_immediately_before_rendering(
+def test_true_peak_measurements_precede_single_timeline_render(
     controller, tmp_path, monkeypatch
 ):
     controller.normalization.setCurrentText("True Peak")
@@ -293,22 +313,17 @@ def test_true_peak_measures_each_clip_immediately_before_rendering(
         if index in controller.measurement_keys:
             events.append(f"measure {path.name}")
         elif callable(args):
-            events.append(f"render {args.args[0].path.name}")
+            events.append(f"render {path.name}")
         else:
             events.append(f"save {path.name}")
     assert events == [
         "measure source0.mp4",
-        "render source0.mp4",
         "measure source1.mp4",
-        "render source1.mp4",
-        "save ordered_A.mp4",
+        "render ordered_A.mp4",
         "measure source2.mp4",
-        "render source2.mp4",
-        "save ordered_B.mp4",
+        "render ordered_B.mp4",
         "measure source3.mp4",
-        "render source3.mp4",
-        "render source0.mp4",
-        "save ordered_C.mp4",
+        "render ordered_C.mp4",
     ]
     controller.running = False
     controller.export_directory.cleanup()
@@ -366,7 +381,9 @@ def test_column_a_is_saved_and_cleaned_before_b_failure(
     controller.start_export(output)
     qtbot.waitUntil(lambda: not controller.running, timeout=30000)
     assert started_b == [True]
-    assert controller.process.exitCode() != 0
+    status = controller.window.statusBar().currentMessage()
+    assert status.startswith("FFmpeg exited with code ")
+    assert not status.startswith("FFmpeg exited with code 0 ")
     assert output.with_name("incremental_A.mp4").stat().st_size > 0
     assert not output.with_name("incremental_C.mp4").exists()
     assert not output.exists()
@@ -590,7 +607,10 @@ def test_parallel_scan_out_of_order_waits_for_all_workers(controller, tmp_path, 
 
     from fastvideoassembly.assembly import Source
 
-    paths = [tmp_path / f"scan{i}.mp4" for i in range(3)]
+    clock = [100.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
+
+    paths = [tmp_path / f"scan{i}.mp4" for i in range(4)]
     controller.clips = [Source(path) for path in paths]
     monkeypatch.setattr(app.QProcess, "start", Mock())
     monkeypatch.setattr(app.QProcess, "readAllStandardError", lambda self: b"")
@@ -604,19 +624,32 @@ def test_parallel_scan_out_of_order_waits_for_all_workers(controller, tmp_path, 
     balance = Mock(wraps=controller.rebalance)
     monkeypatch.setattr(controller, "rebalance", balance)
     controller.create_timelines()
+    assert controller.progress.text().endswith(" - 0.0 it/s")
     first, second = controller.probes
+    clock[0] = 102.0
     second.finished.emit(0, app.QProcess.ExitStatus.NormalExit)
+    assert controller.progress.text().endswith(" - 0.5 it/s")
     assert controller.probing_paths == {first: paths[0], second: paths[2]}
+    controller.pause_scanning()
+    clock[0] = 104.0
     second.finished.emit(0, app.QProcess.ExitStatus.NormalExit)
-    assert controller.pending == []
+    assert controller.pending == [paths[3]]
     assert controller.loading
     balance.assert_not_called()
+    clock[0] = 106.0
+    first.finished.emit(0, app.QProcess.ExitStatus.NormalExit)
+    assert controller.scanning_paused
+    assert controller.progress.text().endswith(" - 0.5 it/s")
+    clock[0] = 206.0
+    controller.pause_scanning()
+    clock[0] = 208.0
     first.finished.emit(0, app.QProcess.ExitStatus.NormalExit)
     assert not controller.loading
     balance.assert_called_once()
     assert [clip.path for clip in controller.clips] == paths
-    assert [clip.duration for clip in controller.clips] == [1, 2, 3]
-    assert controller.progress.value() == 3
+    assert [clip.duration for clip in controller.clips] == [1, 2, 3, 4]
+    assert controller.progress.value() == 4
+    assert controller.progress.text().endswith(" - 0.5 it/s")
 
 
 @pytest.mark.parametrize("action", ["resume", "stop_paused", "stop_active"])
@@ -691,7 +724,9 @@ def test_render_pause_resume_retains_jobs(
     assert not controller.assembler.create_button.isEnabled()
     assert controller.process.state() == app.QProcess.ProcessState.NotRunning
     if stop:
+        log_before_stop = controller.log.toPlainText()
         controller.assembler.stop_button.click()
+        assert controller.log.toPlainText() == log_before_stop
         assert jobs == [0]
     else:
         controller.assembler.pause_button.click()
@@ -720,7 +755,8 @@ def test_import_counts_scanned_videos(
     qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
     assert controller.progress.maximum() == 1
     assert controller.progress.value() == 1
-    assert controller.progress.text() == "1 / 1 videos scanned"
+    assert controller.progress.text().startswith("1 / 1 videos scanned - ")
+    assert controller.progress.text().endswith(" it/s")
 
 
 def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tmp_path):
@@ -793,6 +829,44 @@ def test_assembler_tab_and_shared_process_dock(controller):
         controller.output_dock,
     ):
         assert not controller.assembler.isAncestorOf(dock)
+
+
+def test_activity_copy_and_clear(controller, monkeypatch):
+    assert controller.log_dock.windowTitle() == "Activity"
+    assert controller.log_dock.toggleViewAction().text() == "Activity"
+    assert not controller.assembler.keep_logs.isChecked()
+    controller.log.setPlainText("First line\nSecond line")
+    copy = Mock()
+    monkeypatch.setattr(controller.log, "copy", copy)
+    controller.copy_output.click()
+    assert controller.log.textCursor().selection().toPlainText() == "First line\nSecond line"
+    copy.assert_called_once_with()
+    controller.stage_log = "measurement data"
+    controller.clear_output.click()
+    assert controller.log.toPlainText() == ""
+    assert controller.stage_log == "measurement data"
+
+
+@pytest.mark.parametrize("keep", [False, True])
+@pytest.mark.parametrize("operation", ["scan", "cached_timelines", "render"])
+def test_activity_retention_at_run_start(controller, tmp_path, monkeypatch, keep, operation):
+    from fastvideoassembly.assembly import Source
+
+    controller.assembler.keep_logs.setChecked(keep)
+    controller.log.setPlainText("Previous run")
+    clip = Clip(tmp_path / "source.mp4", 1, 60, 120, True)
+    controller.clips = [Source(clip.path)] if operation == "scan" else [clip]
+    if operation == "render":
+        controller.assembler.tracks = [[clip], [clip], [clip]]
+        monkeypatch.setattr(controller, "start_export_job", Mock())
+        controller.start_export(tmp_path / "output.mp4")
+        controller.running = False
+        controller.export_directory.cleanup()
+    else:
+        monkeypatch.setattr(controller, "probe_next", Mock())
+        controller.create_timelines()
+        controller.loading = False
+    assert controller.log.toPlainText() == ("Previous run" if keep else "")
 
 
 def test_shared_sources_are_neutral_and_tab_filters_portrait(controller, tmp_path):
@@ -897,6 +971,98 @@ def test_audio_dock_modes_persistence_and_busy_state(controller, qtbot):
     assert not controller.audio_panel.isEnabled()
     controller.running = False
 
+
+def test_cpu_performance_settings_persist(controller, qtbot):
+    assert controller.filter_threads.value() == 4
+    assert controller.analysis_workers.value() == 2
+    assert not controller.analysis_workers.isEnabled()
+    controller.filter_threads.setValue(8)
+    controller.normalization.setCurrentText("True Peak")
+    assert controller.analysis_workers.isEnabled()
+    controller.analysis_workers.setValue(3)
+    controller.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.render_config().filter_threads == 8
+    assert restored.analysis_workers.value() == 3
+    restored.audio_codec.setCurrentText("No Audio")
+    assert not restored.analysis_workers.isEnabled()
+
+
+@pytest.mark.parametrize("outcome", ["resume", "stop", "failure", "failure_first"])
+def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
+    clock = [100.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
+    controller.normalization.setCurrentText("True Peak")
+    controller.assembler.tracks = [
+        [Clip(tmp_path / f"{i}.mp4", 1, 60, 120, True) for i in range(3)],
+        [Clip(tmp_path / "0.mp4", 1, 60, 120, True)],
+        [Clip(tmp_path / "1.mp4", 1, 60, 120, True)],
+    ]
+    workers = [Mock(), Mock(), Mock()]
+    for worker in workers:
+        worker.readAllStandardOutput.return_value = b""
+        worker.readAllStandardError.return_value = b""
+    factory = Mock(side_effect=workers)
+    monkeypatch.setattr(app, "QProcess", factory)
+    controller.start_export(tmp_path / "parallel.mp4")
+    assert len(controller.measurement_processes) == 2
+    assert factory.call_count == 2
+    assert controller.progress.text().endswith(" - 0.0 it/s")
+    clock[0] = 102.0
+    controller.pause_export()
+    if outcome == "stop":
+        controller.stop_export()
+        for worker in workers[:2]:
+            worker.write.assert_called_once_with(b"q\n")
+    workers[1].readAllStandardOutput.return_value = b"out_time_us=500000\n"
+    controller.read_measurement(workers[1])
+    assert controller.progress.value() == 83
+    workers[1].readAllStandardOutput.return_value = b""
+    workers[1].readAllStandardError.return_value = b'{"input_tp": "-6.0"}'
+    controller.measurement_finished(workers[1], 1 if outcome == "failure" else 0, None)
+    assert controller.progress.text().endswith(" - 0.5 it/s" if outcome in ("resume", "failure_first") else " - 0.0 it/s")
+    assert controller.running
+    assert controller.export_index == 0
+    workers[0].readAllStandardError.return_value = b'{"input_tp": "-3.0"}'
+    controller.measurement_finished(workers[0], 1 if outcome == "failure_first" else 0, None)
+    assert not controller.measurement_processes
+    if outcome == "resume":
+        assert controller.progress.text().endswith(" - 1.0 it/s")
+        assert controller.render_waiting
+        assert not controller.runtime_timer.isActive()
+        assert controller.export_index == 2
+        assert controller.audio_peaks == {tmp_path / "0.mp4": -3, tmp_path / "1.mp4": -6}
+        controller.pause_export()
+        assert len(controller.measurement_processes) == 1
+        assert factory.call_count == 3
+        assert controller.progress.text().endswith(" - 0.0 it/s")
+        controller.stop_export()
+        controller.measurement_finished(workers[2], 0, None)
+    assert not controller.running
+    assert controller.export_directory is None
+    if outcome in ("failure", "failure_first"):
+        assert "code 1" in controller.window.statusBar().currentMessage()
+        failed_path = tmp_path / ("0.mp4" if outcome == "failure_first" else "1.mp4")
+        assert controller.window.statusBar().currentMessage().endswith(str(failed_path))
+
+
+def test_parallel_true_peak_export(controller, preview_source, tmp_path, qtbot, monkeypatch):
+    config = RenderConfig(column_width=60, height=120, encoder="libx264", speed="fast", normalization="True Peak", filter_threads=2)
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+    clips = []
+    for i in range(3):
+        path = tmp_path / f"parallel_source{i}.mp4"
+        path.hardlink_to(preview_source)
+        clips.append(Clip(path, 0.5, 60, 120, True))
+    controller.assembler.tracks = [clips, [clips[0]], [clips[1]]]
+    controller.start_export(tmp_path / "parallel.mp4")
+    assert len(controller.measurement_processes) == 2
+    qtbot.waitUntil(lambda: not controller.running, timeout=60000)
+    assert controller.process.exitCode() == 0
+    assert set(controller.audio_peaks) == {clip.path for clip in clips} | {tmp_path / "parallel_FINAL.mp4"}
+    assert (tmp_path / "parallel_FINAL.mp4").exists()
+
 def test_click_current_clip_replaces_source_multi_selection(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, "set_clip", Mock())
     clips = [Clip(tmp_path / f"{i}.mp4", 3, 60, 120) for i in range(3)]
@@ -908,7 +1074,7 @@ def test_click_current_clip_replaces_source_multi_selection(controller, tmp_path
     library.item(1).setSelected(True)
     assert len(library.selectedItems()) == 2
     assert not controller.assembler.right_button.isEnabled()
-    assert controller.assembler.remove_button.text() == "Remove Selected Clips"
+    assert controller.assembler.remove_button.text() == "Remove selected"
     event = Mock()
     event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(1, 2))
     controller.timeline_clicked(event)
@@ -1049,7 +1215,7 @@ def test_add_videos_entry_points_and_cancel(controller, tmp_path, monkeypatch, o
     trigger = controller.open_button.click if origin == 'button' else controller.open_action.trigger
     trigger()
     add.assert_called_once_with(paths)
-    assert controller.open_action.text() == '&Add Videos…'
+    assert controller.open_action.text() == '&Add Videos...'
     dialog.deleteLater.assert_called_once()
     add.reset_mock()
     dialog.exec.return_value = app.QDialog.DialogCode.Rejected
@@ -1086,9 +1252,9 @@ def test_import_waits_for_explicit_timeline_creation(controller, preview_source,
     controller.assembler.create_button.click()
     qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
     assert sum(map(len, controller.assembler.tracks)) == 2
-    assert controller.assembler.export_button.text() == 'Render Column Assembly'
+    assert controller.assembler.export_button.text() == 'Render'
     controller.combine.setChecked(False)
-    assert controller.assembler.export_button.text() == 'Render Column Assembly'
+    assert controller.assembler.export_button.text() == 'Render'
     assert controller.assembler.stop_button.text() == 'Stop'
     assert controller.assembler.stop_button.property('buttonSize') == 'large'
     controller.running = True
@@ -1138,6 +1304,138 @@ def test_source_changes_persist_without_closing(controller, preview_source, tmp_
     controller.clear()
     saved.sync()
     assert saved.value('sources/paths', type=list) == []
+
+
+def test_scanned_sources_restore_and_only_scan_remaining(controller, preview_source, tmp_path, qtbot, monkeypatch):
+    from fastvideoassembly.assembly import Source
+
+    paths = [tmp_path / f"cached{i}.mp4" for i in range(3)]
+    for path in paths:
+        path.hardlink_to(preview_source)
+    controller.add_paths(paths)
+    controller.create_timelines()
+    controller.stop_scanning()
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert sum(isinstance(clip, Clip) for clip in controller.clips) == 2
+    assert isinstance(controller.clips[2], Source)
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.clips == controller.clips
+    assert not restored.loading
+    assert restored.assembler.tracks == [[], [], []]
+    parse = Mock(wraps=app.clip_from_probe)
+    monkeypatch.setattr(app, "clip_from_probe", parse)
+    restored.create_timelines()
+    qtbot.waitUntil(lambda: not restored.loading, timeout=15000)
+    assert parse.call_count == 1
+    assert parse.call_args.args[0] == paths[2]
+    complete = app.Application()
+    qtbot.addWidget(complete.window)
+    assert complete.clips == restored.clips
+    complete.create_timelines()
+    assert not complete.loading
+    assert parse.call_count == 1
+    assert sum(map(len, complete.assembler.tracks)) == 3
+    complete.library.setCurrentRow(1)
+    complete.remove_selected_clip()
+    removed = app.Application()
+    qtbot.addWidget(removed.window)
+    assert [clip.path for clip in removed.clips] == [paths[0], paths[2]]
+    assert all(isinstance(clip, Clip) for clip in removed.clips)
+    removed.clear()
+    empty = app.Application()
+    qtbot.addWidget(empty.window)
+    assert empty.clips == []
+    assert empty.settings.beginReadArray("sources/scanned") == 0
+    empty.settings.endArray()
+
+
+def test_render_settings_use_typed_ini_values(controller, qtbot):
+    controller.encoder.setCurrentIndex(controller.encoder.findData("libx264"))
+    controller.quality.setValue(17)
+    controller.filter_threads.setValue(6)
+    controller.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.render_config() == controller.render_config()
+    assert not restored.settings.contains("render/config")
+    assert restored.settings.value("render/quality", type=int) == 17
+    assert restored.settings.value("render/filter_threads", type=int) == 6
+    assert Path(restored.settings.fileName()).suffix == ".ini"
+
+
+@pytest.mark.parametrize("exit_action", [False, True])
+def test_close_flushes_latest_active_state_before_window_closes(controller, tmp_path, qtbot, monkeypatch, exit_action):
+    clips = [Clip(tmp_path / f"latest{i}.mp4", i + 1, 60, 120, True) for i in range(4)]
+    controller.clips = clips
+    controller.assembler.tracks = [[clips[2], clips[0]], [clips[3]], [clips[1]]]
+    controller.quality.setValue(19)
+    controller.project_name.setText("Latest name")
+    controller.window.resize(1100, 800)
+    visibility_at_save = []
+    sync = controller.settings.sync
+
+    def flush():
+        visibility_at_save.append(controller.window.isVisible())
+        sync()
+
+    monkeypatch.setattr(controller.settings, "sync", flush)
+    if exit_action:
+        menu = controller.window.menuBar().actions()[0].menu()
+        next(action for action in menu.actions() if action.text() == "Exit").trigger()
+    else:
+        assert controller.window.close()
+    assert visibility_at_save == [True]
+    assert not controller.window.isVisible()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.clips == clips
+    assert restored.assembler.tracks == controller.assembler.tracks
+    assert restored.quality.value() == 19
+    assert restored.project_name.text() == "Latest name"
+    assert restored.settings.value("mainWindow/geometry") == controller.window.saveGeometry()
+    assert restored.settings.value("mainWindow/state") == controller.window.saveState(1)
+
+
+def test_active_timeline_order_restores_after_each_edit(controller, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(controller.preview, "set_clip", Mock())
+    controller.clips = [Clip(tmp_path / f"order{i}.mp4", i + 1, 60, 120, True) for i in range(6)]
+    controller.rebalance()
+    controller.select_clip(controller.assembler.tracks[0][0])
+    controller.reorder(1)
+    controller.move_column(1)
+    expected = [track[:] for track in controller.assembler.tracks]
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.tracks == expected
+    assert not restored.loading
+    assert restored.probing_paths == {}
+    assert all(clip is next(source for source in restored.clips if source.path == clip.path)
+               for track in restored.assembler.tracks for clip in track)
+
+    controller.library.clearSelection()
+    controller.select_clip(controller.assembler.tracks[1][0])
+    controller.remove_selected_clip()
+    removed = app.Application()
+    qtbot.addWidget(removed.window)
+    assert removed.assembler.tracks == controller.assembler.tracks
+    assert sum(map(len, removed.assembler.tracks)) == 5
+
+    controller.assembler.divisions.setValue(2)
+    divided = app.Application()
+    qtbot.addWidget(divided.window)
+    assert divided.assembler.divisions.value() == 2
+    assert divided.assembler.tracks == [[] for _ in range(6)]
+    controller.rebalance(longest_first=True)
+    ordered = app.Application()
+    qtbot.addWidget(ordered.window)
+    assert ordered.assembler.tracks == controller.assembler.tracks
+
+    controller.clear()
+    empty = app.Application()
+    qtbot.addWidget(empty.window)
+    assert empty.clips == []
+    assert empty.assembler.tracks == [[] for _ in range(6)]
 
 
 def test_interrupted_restore_retains_complete_saved_queue(controller, preview_source, tmp_path, qtbot, monkeypatch):
@@ -1234,7 +1532,7 @@ def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtb
 
 
 def test_final_checkbox_placement_and_busy_lock(controller):
-    assert controller.combine.text() == 'Create Final 3 Column Assembly Cut'
+    assert controller.combine.text() == 'Create final assembly'
     layout = controller.assembler.layout()
     assert layout.itemAt(layout.count() - 2).layout().itemAt(0).widget() is controller.combine
     assert controller.assembler.isAncestorOf(controller.combine)
@@ -1342,7 +1640,7 @@ def test_divisions_balance_display_selection_and_settings(controller, tmp_path, 
     restored = app.Application()
     qtbot.addWidget(restored.window)
     assert restored.assembler.divisions.value() == 2
-    assert restored.assembler.tracks == [[] for _ in range(6)]
+    assert restored.assembler.tracks == controller.assembler.tracks
     restored.clear()
     assert len(restored.assembler.tracks) == 6
     assert [timeline_name(i) for i in [0, 25, 26, 27, 299]] == ['A', 'Z', 'AA', 'AB', 'KN']

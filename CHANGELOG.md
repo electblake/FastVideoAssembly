@@ -4,14 +4,23 @@
 
 ### Added
 
-- Added Open Output Folder beneath the output folder controls to open the selected location in the system file manager.
-- Added an opt-in Remove timelines after FINAL setting that deletes only a division's three rendered timeline files after its final cut finishes successfully.
+- Added Copy output and Clear output beneath the Activity log, plus an unchecked Keep logs between runs option above the timeline actions.
+- Added saved CPU filter threads and bounded parallel True Peak analysis workers, defaulting to four threads and two workers.
+- Added active source metadata, timeline membership, and manual clip ordering persistence in the platformdirs INI settings file, with automatic saving before window close and File > Exit.
+- Added runtime and rendering frames/s to render progress, and completed items/s to audio analysis and source scanning progress; kept ETA in the status bar.
+- Added Open folder beneath the output folder controls to open the selected location in the system file manager.
+- Added an opt-in Delete timelines after final render setting that deletes only a division's three rendered timeline files after its final cut finishes successfully.
 - Added Divisions to balance 3 × N lettered timelines across all sources, display each triple side by side on three rows, and render a separate final cut per division.
 
 ### Changed
 
-- Deferred metadata scanning until Create Timelines; adding, dropping, and restoring sources now loads filenames only and remains available for repeated drops.
-- Moved Create Final 3 Column Assembly Cut above the render buttons; disabling it exports only A/B/C timelines.
+- Renamed Process log to Activity and cleared its output when creating timelines or starting a render unless Keep logs between runs is checked.
+- Deferred new-source metadata scanning until Create Timelines; restored cached metadata and timeline arrangements without rescanning or rebalancing.
+- Rendered each timeline directly from original clips in one FFmpeg filter graph, removing temporary per-clip renders and their concat pass.
+- Replaced JSON render-setting storage with typed INI keys; reset the former JSON-only render options once.
+- Flattened Normalize Audio into the audio settings form and shortened UI labels using ASCII punctuation.
+- Removed duplicate scan counts, render percentages, and measurement log messages.
+- Moved Create final assembly above the render buttons; disabling it exports only A/B/C timelines.
 - Removed the redundant Output Length label below the timeline controls.
 - Labeled columns A, B, and C and replaced middle-dot separators throughout the application with dashes.
 
@@ -21,6 +30,9 @@
 
 ### Fixed
 
+- Identified the failed source correctly when a parallel audio measurement batch ended out of order.
+- Preserved completed columns and stopped paused exports without consuming stale FFmpeg progress.
+- Stopped the runtime timer when pausing or ending an export and tied its lifetime to the main window.
 - Preserved timeline zoom and source-list state when toggling final assembly, avoiding an unnecessary rebuild of the editor.
 
 ## [0.3.2] - 2026-10-23

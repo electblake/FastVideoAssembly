@@ -11,9 +11,8 @@ from fastvideoassembly.assembly import (
     balance,
     clip_duration,
     clip_from_probe,
-    column_jobs,
+    column_arguments,
     composition_arguments,
-    track_durations,
     video_paths,
 )
 
@@ -24,7 +23,7 @@ def test_balanced_tracks_keep_every_portrait_once_and_ascending():
     assert sorted(clip.duration for track in tracks for clip in track) == list(
         range(1, 10)
     )
-    assert track_durations(tracks) == [16, 15, 14]
+    assert [sum(clip.duration for clip in track) for track in tracks] == [16, 15, 14]
     assert all(
         track == sorted(track, key=lambda clip: clip.duration) for track in tracks
     )
@@ -44,8 +43,8 @@ def test_longest_first_preserves_track_membership_and_totals():
     ]
     ascending = balance(clips)
     descending = balance(clips, longest_first=True)
-    assert track_durations(descending) == track_durations(ascending)
     for original, ordered in zip(ascending, descending):
+        assert sum(clip.duration for clip in ordered) == sum(clip.duration for clip in original)
         assert sorted(c.path for c in ordered) == sorted(c.path for c in original)
         durations = [clip.duration for clip in ordered]
         assert durations == sorted(durations, reverse=True)
@@ -108,12 +107,10 @@ def test_center_crop_removes_edges_without_padding(tmp_path):
     )
     output = tmp_path / "cropped.mp4"
     config = RenderConfig(column_width=64, height=120, fps="24", encoder="libx264")
-    jobs = column_jobs(
+    args = column_arguments(
         [Clip(source, 0.5, 120, 120)], output, tmp_path / "crop.txt", config
     )
-    for _, _, args in jobs:
-        args = args() if callable(args) else args
-        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     frame = subprocess.run(
         [
             "ffmpeg",
@@ -188,10 +185,8 @@ def test_audio_survives_columns_silence_gaps_and_three_way_mix(tmp_path, audio_c
     for index, track in enumerate(tracks):
         output = tmp_path / f"column{index}.mp4"
         columns.append(output)
-        jobs = column_jobs(track, output, tmp_path / f"column{index}.txt", config)
-        for _, _, args in jobs:
-            args = args() if callable(args) else args
-            subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+        args = column_arguments(track, output, tmp_path / f"column{index}.txt", config)
+        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     final = tmp_path / "final.mp4"
     args = composition_arguments(columns, 1.5, final, tmp_path / "mix.txt", config)
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
@@ -295,10 +290,8 @@ def test_render_column_positions_order_center_fill_and_final_frame_hold(
     for index, track in enumerate(tracks):
         path = tmp_path / f"column{index}.mp4"
         columns.append(path)
-        jobs = column_jobs(track, path, tmp_path / f"column{index}.txt", config)
-        for _, _, args in jobs:
-            args = args() if callable(args) else args
-            subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+        args = column_arguments(track, path, tmp_path / f"column{index}.txt", config)
+        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     args = composition_arguments(columns, 1.2, output, tmp_path / "graph.txt", config)
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     result = subprocess.run(
@@ -386,7 +379,7 @@ def test_gui_import_and_full_resolution_export(
     assert controller.assembler.export_button.isEnabled()
     output = tmp_path / "gui-output.mp4"
     controller.start_export(output)
-    output = controller.output
+    output = tmp_path / "gui-output_FINAL.mp4"
     assert not controller.assembler.balance_button.isEnabled()
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0
@@ -416,7 +409,7 @@ def test_gui_import_and_full_resolution_export(
     assert controller.export_directory is None
 
 
-def test_hundreds_of_clips_have_one_input_and_no_accumulated_av_drift(tmp_path):
+def test_hundreds_of_clips_render_in_one_job_without_temporary_video_or_av_drift(tmp_path):
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -449,11 +442,11 @@ def test_hundreds_of_clips_have_one_input_and_no_accumulated_av_drift(tmp_path):
         column_width=64, height=120, fps="30000/1001", encoder="libx264"
     )
     output = tmp_path / "long_A.mp4"
-    for _, _, args in column_jobs(track, output, tmp_path / "long.ffconcat", config):
-        args = args() if callable(args) else args
-        assert args.count("-i") == 1
-        result = subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
-        assert b"Non-monotonic" not in result.stderr
+    args = column_arguments(track, output, tmp_path / "long.ffgraph", config)
+    assert args.count("-i") == len(track)
+    result = subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    assert b"Non-monotonic" not in result.stderr
+    assert not list(tmp_path.glob("*.mov"))
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(output)],
         check=True,
@@ -467,7 +460,7 @@ def test_hundreds_of_clips_have_one_input_and_no_accumulated_av_drift(tmp_path):
     assert abs(float(video["start_time"]) - float(audio["start_time"])) < 0.002
 
 
-def test_stop_removes_intermediates_and_does_not_start_next_clip(
+def test_stop_removes_graphs_and_does_not_start_next_timeline(
     media, tmp_path, qtbot, monkeypatch
 ):
     from fastvideoassembly import app
@@ -492,7 +485,7 @@ def test_stop_removes_intermediates_and_does_not_start_next_clip(
     assert controller.export_index == 0
     assert controller.export_directory is None
     assert not temporary.exists()
-    assert not output.with_name("stopped_A.mp4").exists()
+    assert not output.with_name("stopped_B.mp4").exists()
 
 
 @pytest.mark.parametrize("mode", ["None", "True Peak", "YouTube"])
@@ -543,15 +536,14 @@ def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mo
     )
     output = tmp_path / "offset_A.mp4"
     # The preceding video has no audio, followed by a clip with delayed audio.
-    for _, _, args in column_jobs(
+    args = column_arguments(
         [Clip(source, 1.1, 60, 120, False), clip],
         output,
-        tmp_path / "offset.ffconcat",
+        tmp_path / "offset.ffgraph",
         config,
         {source: peak},
-    ):
-        args = args() if callable(args) else args
-        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    )
+    subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     samples = np.frombuffer(
         subprocess.run(
             [

@@ -18,9 +18,19 @@ Use Add Videos or Ctrl+O to select videos and folders together, drop files/folde
 AVI and WebM files, without recursion or duplicates. Importing adds to the
 library without changing timelines. Click Create Timelines to build the arrangement;
 Shortest First and Longest First explicitly rebuild and sort it. Clear assembly starts over.
-The source list is saved when changed, alongside window state on close, and restored on the next launch.
-Adding, dropping, and restoring sources loads filenames only. Create Timelines scans
-unscanned sources before building the arrangement. Sorting is enabled once all sources are scanned.
+One active source list and its scanned metadata are saved in `settings.ini` under
+`platformdirs.user_config_path(APP_NAME, appauthor=False)`. QSettings stores native
+INI values and arrays, with no JSON storage or project files. Each completed scan
+immediately saves duration, display dimensions, and audio presence. Restarting
+restores both scanned clips and unscanned sources in their original order, plus
+timeline membership and manual clip ordering. Timeline edits, sorting, and division
+changes save immediately to the same active state. Startup restores the arrangement
+without rebalancing or scanning. Create Timelines explicitly rebuilds it, scanning
+only remaining sources. Removing or clearing sources also removes their saved
+metadata and timeline entries. To rescan a changed source file, remove it and add it again.
+Render options use typed INI keys; the former JSON render-settings entry is removed
+and its values reset to defaults once. Window state is saved on close.
+Sorting is enabled once all sources are scanned.
 
 The shared source library lists filenames without assembler-specific labels or
 filtering. The **3 Column Assembly** central tab accepts display aspect ratios
@@ -31,7 +41,13 @@ duration-balancing heuristic, not a promise of an optimal equal partition.
 
 All three-column editing and render controls live in that tab. Preview, render,
 audio, and output settings remain shared docks. Progress appears directly above
-the log inside the shared Process log dock, which opens when processing starts.
+the log inside the shared Activity dock, which opens when processing starts.
+Copy output selects and copies the complete log; Clear output empties it.
+Creating timelines or starting a render clears the log unless Keep logs between
+runs is checked. This checkbox starts unchecked and sits above the action buttons.
+Render progress shows runtime and rendering throughput in frames/s; audio analysis
+and source scanning show completed items/s. ETA appears only in the status bar.
+Runtime and throughput exclude paused time.
 
 The central timeline uses a shared seconds axis and duration-scaled blocks,
 including the same output-frame rounding used by rendering.
@@ -46,7 +62,7 @@ did not distribute clip lengths evenly over playback time.
 Selecting a source or timeline segment shares one selection across both views.
 The dockable **Preview** above Render Settings
 shows the selected source with Play/Pause, Stop, and a scrubber.
-**Remove Selected Clip** removes the source and its timeline entries from the
+**Remove selected** removes the source and its timeline entries from the
 assembly without deleting the file or reordering other clips. Use either sorting
 button when you want to redistribute the remaining clips.
 Every timeline must contain a clip before rendering is enabled.
@@ -80,7 +96,7 @@ A/B/C timelines, and the final assembly. Audio measurement, normalization, and m
 are skipped in this mode.
 
 The dockable **Audio Settings** panel sits below Render Settings. Its
-**Normalize Audio → Normalization mode** selector saves one of:
+**Normalize Audio** selector saves one of:
 
 - **None:** leave source levels unchanged; the final equal-weight mix remains.
 - **True Peak:** measure each source's stereo audio before rendering and apply
@@ -92,6 +108,13 @@ The dockable **Audio Settings** panel sits below Render Settings. Its
 
 True Peak measurements use the same resampling, stereo conversion and duration
 as rendering, and are reused when the same source appears more than once.
+**Audio analysis workers** sets the maximum concurrent True Peak measurements
+before each column render (default 2). Measurements run in bounded batches;
+pause takes effect after the active batch, and stop signals all active workers.
+The final mix is measured after its columns finish.
+**CPU filter threads** in Render Settings controls column and final render filter
+graphs (default 4). Both settings are saved. Input decoders remain limited to one
+thread each because a column opens multiple sources. GPU processing is unchanged.
 Missing audio and digital silence remain silent. These are pre-encoding targets;
 AAC encoding can change measured peaks. Very short clips may not provide enough
 audio for a meaningful integrated loudness measurement. Netflix is omitted.
@@ -112,12 +135,12 @@ For example, project `Holiday` on 2026-10-23 produces
 `Holiday.Assembly.2026-10-23_A.mp4`, `_B.mp4`, and `_C.mp4` sequentially,
 then `Holiday.Assembly.2026-10-23_FINAL.mp4` when combining is enabled. These playable
 column cuts retain their natural durations and stay beside the final output.
-Uncheck **Create Final 3 Column Assembly Cut**, above the render buttons, to produce only these files.
+Uncheck **Create final assembly**, above the render buttons, to produce only these files.
 With multiple divisions, timelines continue as `_D`, `_E`, `_F`, etc. Each triple
 has its own combined output: `_FINAL_ABC`, `_FINAL_DEF`, and so on. A single
 division retains `_FINAL`. Each triple and its optional final finish before the
 next triple starts; all target filenames are checked before rendering begins.
-**Remove timelines after FINAL** is off by default. When enabled, each completed
+**Delete timelines after final render** is off by default. When enabled, each completed
 final deletes only its own three rendered timeline files. Failed or stopped finals
 retain their timeline files. Source videos are never deleted. The option is disabled
 when final creation is unchecked.
@@ -131,20 +154,18 @@ A/B/C, an existing unused final file does not block the job. FFmpeg also refuses
 to overwrite files created after this preflight check.
 Stop rendering sends FFmpeg its normal quit command, retains completed and
 partial files, and does not start later stages. Process diagnostics and exit
-codes remain visible. Each column renders one source clip at a time into
-temporary MOV files, then
-joins them sequentially with video stream copy and one audio encode using the selected codec.
-Each clip is measured (when True Peak is selected), then immediately rendered.
-A is completed and saved before any processing of B begins, followed by C.
-Temporary clip files are deleted as soon as their column is saved; completed
-A/B/C outputs remain available if a later stage fails or is stopped.
-Temporary PCM audio avoids per-clip AAC gaps. Cuts align to output frames; a
-partial frame extends to the next frame boundary. The final composite opens only
-A/B/C. Temporary files are removed when rendering ends or is stopped; allow disk
-space for encoded clips and uncompressed stereo audio during rendering.
+codes remain visible. Each timeline is encoded in one FFmpeg process directly
+from its original source clips, with no per-clip temporary video or audio files.
+The filter graph crops, scales, aligns frame boundaries, normalizes audio,
+and concatenates the clips before encoding the timeline output once.
+When True Peak is selected, source audio is measured before that timeline's render.
+A is completed and saved before B starts, followed by C. Completed timeline
+outputs remain available if a later stage fails or is stopped. The final composite
+reads those timeline outputs. Only small filter-graph text files are temporary;
+these are deleted after their timeline completes or when rendering ends or stops.
 Source audio timestamps are preserved relative to video, including delayed
-audio starts and silent gaps. Each temporary clip has matching audio/video
-boundaries so timing differences do not accumulate across the column.
+audio starts and silent gaps. Each clip has matching audio/video boundaries
+so timing differences do not accumulate across the timeline.
 
 Settings → Appearance offers the same qt-themes palettes and icon variants as
 FastVideoCropper. QSettings stores preferences, Divisions, geometry, and dock positions

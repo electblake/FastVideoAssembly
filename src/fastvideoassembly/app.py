@@ -13,7 +13,7 @@ from time import monotonic
 import pyqtgraph as pg
 import qt_themes
 from platformdirs import user_config_path
-from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, Qt, QUrl
+from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -50,7 +49,7 @@ from .assembly import (
     Source,
     clip_duration,
     clip_from_probe,
-    column_jobs,
+    column_arguments,
     composition_arguments,
     timeline_name,
     video_paths,
@@ -103,7 +102,6 @@ class Application(QObject):
         self.render_paused = False
         self.render_waiting = False
         self.selected_clip = None
-        self.output = None
         self.export_directory = None
         self.window = QMainWindow()
         self.window.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
@@ -118,20 +116,47 @@ class Application(QObject):
         self.process.readyReadStandardOutput.connect(self.read_progress)
         self.process.readyReadStandardError.connect(self.read_log)
         self.process.finished.connect(self.finished)
+        self.measurement_processes = {}
+        self.runtime_timer = QTimer(self.window)
+        self.runtime_timer.setInterval(1000)
+        self.runtime_timer.timeout.connect(self.update_runtime)
         self.build_ui()
         self.apply_appearance()
         if self.settings.contains("mainWindow/geometry"):
             self.window.restoreGeometry(self.settings.value("mainWindow/geometry"))
         if self.settings.contains("mainWindow/state"):
             self.window.restoreState(self.settings.value("mainWindow/state"), 1)
-        self.refresh()
         saved_sources = self.settings.value("sources/paths", [], type=list)
-        if saved_sources or paths:
-            self.add_paths([*saved_sources, *paths], initialize_project=not saved_sources)
+        scanned = {}
+        for index in range(self.settings.beginReadArray("sources/scanned")):
+            self.settings.setArrayIndex(index)
+            path = Path(self.settings.value("path"))
+            scanned[path] = Clip(
+                path,
+                self.settings.value("duration", type=float),
+                self.settings.value("width", type=float),
+                self.settings.value("height", type=float),
+                self.settings.value("has_audio", type=bool),
+            )
+        self.settings.endArray()
+        self.clips = [
+            scanned[Path(path)] if Path(path) in scanned else Source(Path(path))
+            for path in saved_sources
+        ]
+        for index in range(self.settings.beginReadArray("assembly/timelines")):
+            self.settings.setArrayIndex(index)
+            self.assembler.tracks[index] = [
+                scanned[Path(path)]
+                for path in self.settings.value("paths", type=list)
+            ]
+        self.settings.endArray()
+        self.refresh()
+        if paths:
+            self.add_paths(paths, initialize_project=not saved_sources)
 
     def build_ui(self):
         file_menu = self.window.menuBar().addMenu("&File")
-        self.open_action = QAction("&Add Videos…", self)
+        self.open_action = QAction("&Add Videos...", self)
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.open_folder)
         file_menu.addAction(self.open_action)
@@ -160,7 +185,7 @@ class Application(QObject):
         appearance_layout.addWidget(self.theme)
         appearance_layout.addWidget(QLabel("Application icon"))
         appearance_layout.addWidget(self.icon)
-        apply = QPushButton("Apply appearance")
+        apply = QPushButton("Apply")
         apply.clicked.connect(self.apply_appearance)
         appearance_layout.addWidget(apply)
         appearance_action = QWidgetAction(self.window)
@@ -185,10 +210,10 @@ class Application(QObject):
         self.library.currentRowChanged.connect(self.select_source)
         self.library.itemSelectionChanged.connect(self.select_source)
         library_layout.addWidget(self.library)
-        self.remove_sources_button = QPushButton("Remove Selected Clips")
+        self.remove_sources_button = QPushButton("Remove selected")
         self.remove_sources_button.clicked.connect(self.remove_selected_clip)
         library_layout.addWidget(self.remove_sources_button)
-        self.clear_sources_button = QPushButton("Clear All Sources")
+        self.clear_sources_button = QPushButton("Clear all")
         self.clear_sources_button.clicked.connect(self.clear)
         library_layout.addWidget(self.clear_sources_button)
         scan_row = QHBoxLayout()
@@ -247,20 +272,33 @@ class Application(QObject):
         process_layout.addWidget(self.progress)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log_dock = QDockWidget("Process log", self.window)
+        self.log_dock = QDockWidget("Activity", self.window)
         self.log_dock.setObjectName("processLog")
         process_layout.addWidget(self.log, 1)
+        log_actions = QHBoxLayout()
+        self.copy_output = QPushButton("Copy output")
+        self.copy_output.clicked.connect(self.copy_log)
+        self.clear_output = QPushButton("Clear output")
+        self.clear_output.clicked.connect(self.log.clear)
+        log_actions.addWidget(self.copy_output)
+        log_actions.addWidget(self.clear_output)
+        log_actions.addStretch()
+        process_layout.addLayout(log_actions)
         self.log_dock.setWidget(process_panel)
         self.window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.hide()
         view_menu.addAction(self.log_dock.toggleViewAction())
 
+    def copy_log(self):
+        self.log.selectAll()
+        self.log.copy()
+
     def build_render_settings(self, view_menu):
         self.render_panel = QWidget()
         form = QFormLayout(self.render_panel)
         self.resolution = QComboBox()
-        self.resolution.addItem("1920 × 1080 (640 × 1080 per column)", [640, 1080])
-        self.resolution.addItem("3840 × 2160 (1280 × 2160 per column)", [1280, 2160])
+        self.resolution.addItem("1920 x 1080 (640 x 1080 per column)", [640, 1080])
+        self.resolution.addItem("3840 x 2160 (1280 x 2160 per column)", [1280, 2160])
         self.frame_rate = QComboBox()
         for label, value in [
             ("23.976", "24000/1001"),
@@ -280,10 +318,12 @@ class Application(QObject):
             self.speed.addItem(value.title(), value)
         self.quality = QSpinBox()
         self.quality.setRange(1, 51)
-        self.combine = QCheckBox("Create Final 3 Column Assembly Cut")
-        saved = RenderConfig()
-        if self.settings.contains("render/config"):
-            saved = RenderConfig(**json.loads(self.settings.value("render/config")))
+        self.combine = QCheckBox("Create final assembly")
+        self.settings.remove("render/config")
+        saved = RenderConfig(**{
+            key: self.settings.value(f"render/{key}", value, type=type(value))
+            for key, value in asdict(RenderConfig()).items()
+        })
         self.resolution.setCurrentIndex(
             self.resolution.findData([saved.column_width, saved.height])
         )
@@ -291,6 +331,10 @@ class Application(QObject):
         self.encoder.setCurrentIndex(self.encoder.findData(saved.encoder))
         self.speed.setCurrentIndex(self.speed.findData(saved.speed))
         self.quality.setValue(saved.quality)
+        self.filter_threads = QSpinBox()
+        self.filter_threads.setRange(1, 256)
+        self.filter_threads.setValue(saved.filter_threads)
+        self.filter_threads.setToolTip("CPU threads for video and audio filter graphs per render job.")
         self.combine.setChecked(self.settings.value("render/combine", True, type=bool))
         for title, widget in [
             ("Output size", self.resolution),
@@ -298,6 +342,7 @@ class Application(QObject):
             ("Encoder", self.encoder),
             ("Speed / quality", self.speed),
             ("Quality value", self.quality),
+            ("CPU filter threads", self.filter_threads),
         ]:
             form.addRow(title, widget)
             widget.setAccessibleName(title)
@@ -311,6 +356,7 @@ class Application(QObject):
         for combo in (self.resolution, self.frame_rate, self.encoder, self.speed):
             combo.currentIndexChanged.connect(self.render_settings_changed)
         self.quality.valueChanged.connect(self.render_settings_changed)
+        self.filter_threads.valueChanged.connect(self.render_settings_changed)
         self.combine.toggled.connect(
             lambda checked: self.settings.setValue("render/combine", checked)
         )
@@ -333,17 +379,20 @@ class Application(QObject):
             self.audio_codec.findData(self.settings.value("audio/codec", "aac"))
         )
         codec_form.addRow("Codec", self.audio_codec)
-        layout.addLayout(codec_form)
-        group = QGroupBox("Normalize Audio")
-        form = QFormLayout(group)
         self.normalization = QComboBox()
         self.normalization.addItems(["None", "True Peak", "YouTube"])
         self.normalization.setAccessibleName("Normalization mode")
         self.normalization.setCurrentText(
             self.settings.value("audio/normalization", "None")
         )
-        form.addRow("Normalization mode", self.normalization)
-        layout.addWidget(group)
+        codec_form.addRow("Normalize Audio", self.normalization)
+        self.analysis_workers = QSpinBox()
+        self.analysis_workers.setRange(1, 32)
+        self.analysis_workers.setValue(self.settings.value("audio/analysis_workers", 2, type=int))
+        self.analysis_workers.setAccessibleName("Audio analysis workers")
+        self.analysis_workers.setToolTip("Maximum simultaneous True Peak measurements before each column render.")
+        codec_form.addRow("Audio analysis workers", self.analysis_workers)
+        layout.addLayout(codec_form)
         layout.addStretch()
         self.audio_dock = QDockWidget("Audio Settings", self.window)
         self.audio_dock.setObjectName("audioSettings")
@@ -357,6 +406,7 @@ class Application(QObject):
         view_menu.addAction(self.audio_dock.toggleViewAction())
         self.normalization.currentTextChanged.connect(self.audio_settings_changed)
         self.audio_codec.currentIndexChanged.connect(self.audio_settings_changed)
+        self.analysis_workers.valueChanged.connect(self.audio_settings_changed)
         self.audio_settings_changed()
 
     def build_output_settings(self, view_menu):
@@ -389,12 +439,12 @@ class Application(QObject):
             "{project}: project name; {date}: YYYY-MM-DD. _A, _B, _C and _FINAL are added automatically."
         )
         self.output_folder = QLineEdit(self.settings.value("output/folder", ""))
-        self.output_browse = QPushButton("Browse…")
+        self.output_browse = QPushButton("Browse...")
         self.output_browse.clicked.connect(self.browse_output_folder)
         folder_row = QHBoxLayout()
         folder_row.addWidget(self.output_folder, 1)
         folder_row.addWidget(self.output_browse)
-        self.output_open = QPushButton("Open Output Folder")
+        self.output_open = QPushButton("Open folder")
         self.output_open.setEnabled(bool(self.output_folder.text().strip()))
         self.output_folder.textChanged.connect(
             lambda text: self.output_open.setEnabled(bool(text.strip()))
@@ -450,6 +500,8 @@ class Application(QObject):
     def audio_settings_changed(self):
         self.normalization.setEnabled(self.audio_codec.currentData() != "none")
         mode = self.normalization.currentText()
+        self.analysis_workers.setEnabled(self.audio_codec.currentData() != "none" and mode == "True Peak")
+        self.settings.setValue("audio/analysis_workers", self.analysis_workers.value())
         self.settings.setValue("audio/normalization", mode)
         self.settings.setValue("audio/codec", self.audio_codec.currentData())
 
@@ -464,12 +516,12 @@ class Application(QObject):
             self.quality.value(),
             self.normalization.currentText(),
             self.audio_codec.currentData(),
+            self.filter_threads.value(),
         )
 
     def render_settings_changed(self):
-        self.settings.setValue(
-            "render/config", json.dumps(asdict(self.render_config()))
-        )
+        for key, value in asdict(self.render_config()).items():
+            self.settings.setValue(f"render/{key}", value)
         self.settings.setValue("render/combine", self.combine.isChecked())
         self.refresh()
 
@@ -533,20 +585,42 @@ class Application(QObject):
         if not additions:
             return
         self.clips.extend(Source(path) for path in additions)
-        self.settings.setValue(
-            "sources/paths", [str(clip.path) for clip in self.clips]
-        )
-        self.settings.sync()
+        self.save_active_state()
         self.refresh()
 
+    def save_active_state(self):
+        self.settings.setValue("sources/paths", [str(clip.path) for clip in self.clips])
+        scanned = [clip for clip in self.clips if isinstance(clip, Clip)]
+        self.settings.remove("sources/scanned")
+        self.settings.beginWriteArray("sources/scanned", len(scanned))
+        for index, clip in enumerate(scanned):
+            self.settings.setArrayIndex(index)
+            self.settings.setValue("path", str(clip.path))
+            self.settings.setValue("duration", clip.duration)
+            self.settings.setValue("width", clip.width)
+            self.settings.setValue("height", clip.height)
+            self.settings.setValue("has_audio", clip.has_audio)
+        self.settings.endArray()
+        self.settings.remove("assembly/timelines")
+        self.settings.beginWriteArray("assembly/timelines", len(self.assembler.tracks))
+        for index, track in enumerate(self.assembler.tracks):
+            self.settings.setArrayIndex(index)
+            self.settings.setValue("paths", [str(clip.path) for clip in track])
+        self.settings.endArray()
+        self.settings.sync()
+
     def create_timelines(self):
+        if not self.assembler.keep_logs.isChecked():
+            self.log.clear()
         self.scanning_paused = False
         self.scan_stop_requested = False
         self.pending = [clip.path for clip in self.clips if isinstance(clip, Source)]
         if not self.pending:
             self.rebalance()
             return
-        self.progress.setFormat("%v / %m videos scanned")
+        self.scan_started = monotonic()
+        self.scan_completed = 0
+        self.progress.setFormat("%v / %m videos scanned - 0.0 it/s")
         self.progress.setRange(0, len(self.clips))
         self.progress.setValue(len(self.clips) - len(self.pending))
         self.scan_worker_count = (
@@ -572,12 +646,13 @@ class Application(QObject):
                 self.loading = False
                 self.scanning_paused = False
                 self.scan_stop_requested = False
-                self.window.statusBar().showMessage("Scanning stopped - Create Timelines resumes remaining sources")
+                self.window.statusBar().showMessage("Scanning stopped. Create Timelines to continue.")
                 self.refresh()
             return
         if self.scanning_paused:
             if not self.probing_paths:
-                self.window.statusBar().showMessage("Scanning paused - completed scans retained")
+                self.scan_pause_started = monotonic()
+                self.window.statusBar().showMessage("Scanning paused")
             return
         for probe in self.probes[:self.scan_worker_count]:
             if self.pending and probe not in self.probing_paths:
@@ -585,7 +660,7 @@ class Application(QObject):
                 self.probing_paths[probe] = path
                 self.log_dock.show()
                 self.window.statusBar().showMessage(
-                    f"Scanning {self.progress.value()} / {self.progress.maximum()} complete - {path.name}"
+                    f"Scanning: {path.name}"
                 )
                 probe.start(
                     self.ffprobe,
@@ -602,6 +677,8 @@ class Application(QObject):
 
     def pause_scanning(self):
         self.scanning_paused = not self.scanning_paused
+        if not self.scanning_paused and not self.probing_paths:
+            self.scan_started += monotonic() - self.scan_pause_started
         self.window.statusBar().showMessage(
             "Pausing scanning after active scans finish" if self.scanning_paused
             else "Resuming scanning"
@@ -624,16 +701,19 @@ class Application(QObject):
         if self.selected_clip == self.clips[index]:
             self.selected_clip = clip
         self.clips[index] = clip
+        self.save_active_state()
         self.progress.setValue(self.progress.value() + 1)
+        self.scan_completed += 1
+        rate = self.scan_completed / (monotonic() - self.scan_started)
+        self.progress.setFormat(f"%v / %m videos scanned - {rate:.1f} it/s")
         del self.probing_paths[probe]
         self.probe_next()
 
     def clear(self):
         self.selected_clip = None
         self.clips.clear()
-        self.settings.setValue("sources/paths", [])
-        self.settings.sync()
         self.assembler.tracks = [[] for _ in range(3 * self.assembler.divisions.value())]
+        self.save_active_state()
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
@@ -643,10 +723,12 @@ class Application(QObject):
     def divisions_changed(self, value):
         self.settings.setValue("assembly/divisions", value)
         self.assembler.tracks = [[] for _ in range(3 * value)]
+        self.save_active_state()
         self.refresh()
 
     def rebalance(self, longest_first=False):
         self.assembler.rebalance(self.clips, longest_first=longest_first)
+        self.save_active_state()
         self.refresh()
         self.window.statusBar().showMessage("Ready")
 
@@ -775,12 +857,11 @@ class Application(QObject):
             for item in self.library.selectedItems()
         }
         self.clips = [clip for clip in self.clips if clip.path not in paths]
-        self.settings.setValue("sources/paths", [str(clip.path) for clip in self.clips])
-        self.settings.sync()
         self.assembler.tracks = [
             [clip for clip in track if clip.path not in paths]
             for track in self.assembler.tracks
         ]
+        self.save_active_state()
         self.selected_clip = None
         self.refresh()
 
@@ -789,6 +870,7 @@ class Application(QObject):
         row = self.assembler.active_row
         track = self.assembler.tracks[column]
         track[row], track[row + offset] = track[row + offset], track[row]
+        self.save_active_state()
         self.refresh()
 
     def move_column(self, offset):
@@ -797,6 +879,7 @@ class Application(QObject):
         clip = self.assembler.tracks[column].pop(row)
         target = column + offset
         self.assembler.tracks[target].append(clip)
+        self.save_active_state()
         self.refresh()
 
     def timeline_clicked(self, event):
@@ -833,10 +916,6 @@ class Application(QObject):
         self.library.setEnabled(idle)
         removable = idle and bool(self.library.selectedItems())
         self.assembler.remove_button.setEnabled(removable)
-        self.assembler.remove_button.setText(
-            "Remove Selected Clips" if len(self.library.selectedItems()) > 1
-            else "Remove Selected Clip"
-        )
         self.remove_sources_button.setEnabled(removable)
         self.clear_sources_button.setEnabled(idle and bool(self.clips))
         self.parallel_scanning.setEnabled(idle)
@@ -883,7 +962,6 @@ class Application(QObject):
                 + "\n".join(str(path) for path in existing),
             )
             return
-        self.output = finals[-1]
         self.export_directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-")
         graph_root = Path(self.export_directory.name)
         config = self.render_config()
@@ -901,10 +979,8 @@ class Application(QObject):
             for index in range(division_start, division_start + 3):
                 track, path = self.assembler.tracks[index], columns[index]
                 group_start = len(self.export_jobs)
-                manifest = graph_root / f"column{index}.ffconcat"
-                jobs = list(column_jobs(track, path, manifest, config, self.audio_peaks))
-                temporary_paths = [manifest]
-                for clip, job in zip(track, jobs[:-1]):
+                graph_path = graph_root / f"column{index}.ffgraph"
+                for clip in track:
                     if (
                         config.audio_codec != "none"
                         and config.normalization == "True Peak"
@@ -916,10 +992,11 @@ class Application(QObject):
                             (clip.path, clip.duration, peak_measurement_arguments(clip))
                         )
                         scheduled_measurements.add(clip.path)
-                    self.export_jobs.append(job)
-                    temporary_paths.extend([job[0], job[0].with_suffix(".ffgraph")])
-                self.column_cleanup[len(self.export_jobs)] = temporary_paths
-                self.export_jobs.append(jobs[-1])
+                self.column_cleanup[len(self.export_jobs)] = [graph_path]
+                self.export_jobs.append((
+                    path, durations[index],
+                    partial(column_arguments, track, path, graph_path, config, self.audio_peaks),
+                ))
                 self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
             if self.combine.isChecked():
                 output = finals[division_start // 3]
@@ -952,7 +1029,8 @@ class Application(QObject):
         self.render_paused = False
         self.render_waiting = False
         self.progress.setValue(0)
-        self.log.clear()
+        if not self.assembler.keep_logs.isChecked():
+            self.log.clear()
         self.log_dock.show()
         self.running = True
         self.update_enabled()
@@ -968,9 +1046,13 @@ class Application(QObject):
             self.progress.setRange(0, 1000)
             self.progress.setValue(0)
         self.stage_seconds = 0.0
+        self.render_frames_per_second = 0.0
         self.progress_buffer = ""
         path, self.stage_duration, args = self.export_jobs[self.export_index]
         measuring = self.export_index in self.measurement_keys
+        self.measuring_audio = measuring
+        self.audio_items_processed = 0
+        self.audio_analysis_started = monotonic()
         if callable(args):
             if (
                 args.func is composition_arguments
@@ -984,14 +1066,71 @@ class Application(QObject):
         operation = "Measuring audio" if measuring else "Rendering"
         self.stage_description = f"{operation} - {path.name}"
         self.update_export_progress()
+        self.runtime_timer.start()
+        if measuring:
+            self.start_measurement_batch()
+            return
         self.log.appendPlainText(f"{operation} {path}\n")
         self.process.start(self.ffmpeg, args)
+
+    def start_measurement_batch(self):
+        self.measurement_exit_code = 0
+        self.measurement_last = self.export_index
+        self.measurement_seconds = {}
+        for index in range(self.export_index, min(len(self.export_jobs), self.export_index + self.analysis_workers.value())):
+            if index not in self.measurement_keys:
+                break
+            path, _duration, args = self.export_jobs[index]
+            process = QProcess(self)
+            self.measurement_processes[process] = [index, "", ""]
+            self.measurement_seconds[index] = 0.0
+            process.readyReadStandardOutput.connect(partial(self.read_measurement, process))
+            process.readyReadStandardError.connect(partial(self.read_measurement, process))
+            process.finished.connect(partial(self.measurement_finished, process))
+            self.measurement_last = index
+            self.log.appendPlainText(f"Measuring audio {path}\n")
+            process.start(self.ffmpeg, args)
+
+    def read_measurement(self, process):
+        state = self.measurement_processes[process]
+        index = state[0]
+        state[1] += bytes(process.readAllStandardOutput()).decode()
+        text = bytes(process.readAllStandardError()).decode()
+        state[2] += text
+        self.log.appendPlainText(text)
+        while "\n" in state[1]:
+            line, state[1] = state[1].split("\n", 1)
+            if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
+                self.measurement_seconds[index] = max(self.measurement_seconds[index], min(self.export_jobs[index][1] * 0.999, int(line[12:]) / 1_000_000))
+        self.stage_seconds = sum(self.measurement_seconds.values())
+        self.update_export_progress()
+
+    def measurement_finished(self, process, exit_code, exit_status):
+        self.read_measurement(process)
+        index, _, log = self.measurement_processes.pop(process)
+        process.deleteLater()
+        self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
+        if exit_code == 0 and not self.stop_requested:
+            measured = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
+            self.audio_peaks[self.measurement_keys[index]] = float(measured["input_tp"])
+            self.measurement_seconds[index] = self.export_jobs[index][1]
+            self.audio_items_processed += 1
+            self.update_runtime()
+        if exit_code != 0:
+            self.measurement_exit_code = exit_code
+            self.measurement_last = index
+        if self.measurement_processes:
+            return
+        self.stage_seconds = sum(self.measurement_seconds.values())
+        self.update_export_progress()
+        self.export_index = self.measurement_last
+        self.advance_export(self.measurement_exit_code)
 
     def pause_export(self):
         self.render_paused = not self.render_paused
         self.update_enabled()
         if self.render_paused:
-            self.window.statusBar().showMessage("Pausing rendering after the current job finishes")
+            self.window.statusBar().showMessage("Pausing after active work finishes")
         elif self.render_waiting:
             self.group_started += monotonic() - self.render_pause_started
             self.render_waiting = False
@@ -1000,7 +1139,10 @@ class Application(QObject):
     def stop_export(self):
         self.stop_requested = True
         if self.render_waiting:
-            self.finished(0, QProcess.ExitStatus.NormalExit)
+            self.end_export("Rendering stopped")
+        elif self.measurement_processes:
+            for process in self.measurement_processes:
+                process.write(b"q\n")
         else:
             self.process.write(b"q\n")
 
@@ -1008,6 +1150,9 @@ class Application(QObject):
         self.progress_buffer += bytes(self.process.readAllStandardOutput()).decode()
         while "\n" in self.progress_buffer:
             line, self.progress_buffer = self.progress_buffer.split("\n", 1)
+            if line.startswith("fps="):
+                self.render_frames_per_second = float(line[4:])
+                self.update_runtime()
             if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
                 self.stage_seconds = max(
                     self.stage_seconds,
@@ -1021,9 +1166,20 @@ class Application(QObject):
         fraction = completed / total
         self.progress.setValue(min(999, int(fraction * 1000)) if fraction < 1 else 1000)
         eta = timestamp((monotonic() - self.group_started) * (total - completed) / completed) if completed else "--:--:--"
-        self.progress.setFormat(f"{self.group_name} - %p% - ETA {eta}")
+        self.update_runtime()
         self.window.statusBar().showMessage(
-            f"{self.group_name} - {self.progress.value() // 10}% - ETA {eta} - {self.stage_description}"
+            f"{self.stage_description}. ETA {eta}"
+        )
+
+    def update_runtime(self):
+        elapsed = timestamp(monotonic() - self.group_started)
+        if self.measuring_audio:
+            rate = self.audio_items_processed / (monotonic() - self.audio_analysis_started) if self.audio_items_processed else 0.0
+            throughput = f"{rate:.1f} it/s"
+        else:
+            throughput = f"{self.render_frames_per_second:.1f} frames/s"
+        self.progress.setFormat(
+            f"{self.group_name} - %p% - Runtime {elapsed} - {throughput}"
         )
 
     def read_log(self):
@@ -1038,24 +1194,10 @@ class Application(QObject):
             self.stage_seconds = self.stage_duration
             self.update_export_progress()
         self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
-        if (
-            exit_code == 0
-            and not self.stop_requested
-            and self.export_index in self.measurement_keys
-        ):
-            measured = json.loads(
-                self.stage_log[
-                    self.stage_log.rindex("{") : self.stage_log.rindex("}") + 1
-                ]
-            )
-            self.audio_peaks[self.measurement_keys[self.export_index]] = float(
-                measured["input_tp"]
-            )
-        if (
-            exit_code == 0
-            and not self.stop_requested
-            and self.export_index in self.column_cleanup
-        ):
+        self.advance_export(exit_code)
+
+    def advance_export(self, exit_code):
+        if exit_code == 0 and not self.stop_requested and self.export_index in self.column_cleanup:
             for path in self.column_cleanup[self.export_index]:
                 path.unlink()
         if (
@@ -1065,23 +1207,25 @@ class Application(QObject):
         ):
             self.export_index += 1
             if self.render_paused:
+                self.runtime_timer.stop()
                 self.render_waiting = True
                 self.render_pause_started = monotonic()
-                self.window.statusBar().showMessage("Rendering paused - completed jobs retained")
+                self.window.statusBar().showMessage("Rendering paused")
                 self.update_enabled()
             else:
                 self.start_export_job()
             return
+        self.end_export(
+            "Rendering stopped" if self.stop_requested else f"FFmpeg exited with code {exit_code}"
+        )
+
+    def end_export(self, result):
+        self.runtime_timer.stop()
         self.running = False
         self.render_paused = False
         self.render_waiting = False
         self.export_directory.cleanup()
         self.export_directory = None
-        result = (
-            "Rendering stopped"
-            if self.stop_requested
-            else f"FFmpeg exited with code {exit_code}"
-        )
         self.window.statusBar().showMessage(
             f"{result} - {self.export_jobs[self.export_index][0]}"
         )
@@ -1112,9 +1256,8 @@ class Application(QObject):
                 return True
             self.preview.player.stop()
             self.settings.setValue("mainWindow/geometry", self.window.saveGeometry())
-            self.settings.setValue("sources/paths", [str(clip.path) for clip in self.clips])
             self.settings.setValue("mainWindow/state", self.window.saveState(1))
-            self.settings.sync()
+            self.save_active_state()
         return super().eventFilter(watched, event)
 
 

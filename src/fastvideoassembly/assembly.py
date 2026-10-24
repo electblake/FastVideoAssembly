@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from fractions import Fraction
-from functools import partial
 from math import ceil
 from pathlib import Path
 
@@ -96,10 +95,6 @@ def balance(clips, longest_first=False, track_count=3):
     return tracks
 
 
-def track_durations(tracks):
-    return [sum(clip.duration for clip in track) for track in tracks]
-
-
 @dataclass(frozen=True)
 class RenderConfig:
     column_width: int = 640
@@ -110,6 +105,7 @@ class RenderConfig:
     quality: int = 20
     normalization: str = "None"
     audio_codec: str = "aac"
+    filter_threads: int = 4
 
     @property
     def pixel_format(self):
@@ -160,106 +156,57 @@ def clip_duration(clip, config):
     return float(ceil(Fraction(str(clip.duration)) * rate) / rate)
 
 
-def clip_arguments(clip, output, graph_path, config, peaks=None):
-    """Encode a single center-filled clip with continuous, uncompressed audio."""
-    duration = clip_duration(clip, config)
-    filters = [
-        (
-            "[0:v:0]"
+def column_arguments(track, output, graph_path, config, peaks=None):
+    """Encode a complete timeline directly from its original sources."""
+    args = ["-hide_banner", "-n", "-filter_complex_threads", str(config.filter_threads)]
+    filters = []
+    inputs = []
+    for index, clip in enumerate(track):
+        duration = clip_duration(clip, config)
+        args += ["-threads", "1", "-t", str(duration), "-i", str(clip.path)]
+        filters.append(
+            f"[{index}:v:0]setpts=PTS-STARTPTS,"
             f"scale={config.column_width}:{config.height}:force_original_aspect_ratio=increase:"
             "force_divisible_by=2:reset_sar=1,"
             f"crop={config.column_width}:{config.height}:(iw-ow)/2:(ih-oh)/2,"
             f"fps={config.fps}:start_time=0,format={config.pixel_format},setsar=1,"
-            f"tpad=stop_mode=clone:stop=-1,trim=duration={duration}[output]"
+            f"tpad=stop_mode=clone:stop=-1,trim=duration={duration},"
+            f"setpts=PTS-STARTPTS[v{index}]"
         )
-    ]
-    if config.audio_codec != "none" and clip.has_audio:
-        peak = peaks[clip.path] if config.normalization == "True Peak" else None
-        normalize = normalization_filter(config.normalization, peak)
-        filters.append(
-            "[0:a:0]aresample=48000:async=1:first_pts=0,"
-            "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"atrim=duration={clip.duration},{normalize},"
-            f"apad,atrim=duration={duration}[audio]"
-        )
-    elif config.audio_codec != "none":
-        filters.append(
-            "anullsrc=r=48000:cl=stereo,"
-            f"atrim=duration={duration},asetpts=PTS-STARTPTS[audio]"
-        )
+        inputs.append(f"[v{index}]")
+        if config.audio_codec != "none":
+            if clip.has_audio:
+                peak = peaks[clip.path] if config.normalization == "True Peak" else None
+                normalize = normalization_filter(config.normalization, peak)
+                filters.append(
+                    f"[{index}:a:0]aresample=48000:async=1:first_pts=0,"
+                    "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    f"atrim=duration={clip.duration},{normalize},"
+                    f"apad,atrim=duration={duration},asetpts=PTS-STARTPTS[a{index}]"
+                )
+            else:
+                filters.append(
+                    "anullsrc=r=48000:cl=stereo,"
+                    f"atrim=duration={duration},asetpts=PTS-STARTPTS[a{index}]"
+                )
+            inputs.append(f"[a{index}]")
+    audio = config.audio_codec != "none"
+    filters.append(
+        "".join(inputs) + f"concat=n={len(track)}:v=1:a={int(audio)}[output]"
+        + ("[audio]" if audio else "")
+    )
     Path(graph_path).write_text(";\n".join(filters), encoding="utf-8")
     return (
-        [
-            "-hide_banner",
-            "-n",
-            "-i",
-            str(clip.path),
-            "-/filter_complex",
-            str(graph_path),
-            "-map",
-            "[output]",
-        ]
-        + (["-map", "[audio]"] if config.audio_codec != "none" else [])
+        args + ["-/filter_complex", str(graph_path), "-map", "[output]"]
+        + (["-map", "[audio]"] if audio else [])
         + config.encoding_arguments()
-        + (["-c:a", "pcm_s24le"] if config.audio_codec != "none" else [])
         + [str(output)]
     )
 
 
-def column_jobs(track, output, manifest, config, peaks=None):
-    """Render clips sequentially, then copy their video into an A/B/C output."""
-    manifest = Path(manifest)
-    lines = ["ffconcat version 1.0"]
-    for index, clip in enumerate(track):
-        segment = manifest.with_name(f"{manifest.stem}-{index}.mov")
-        duration = clip_duration(clip, config)
-        lines += [f"file '{segment.name}'", f"duration {duration:.9f}"]
-        yield (
-            segment,
-            duration,
-            partial(
-                clip_arguments,
-                clip,
-                segment,
-                segment.with_suffix(".ffgraph"),
-                config,
-                peaks,
-            ),
-        )
-    manifest.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    args = [
-        "-hide_banner",
-        "-n",
-        "-f",
-        "concat",
-        "-i",
-        str(manifest),
-        "-map",
-        "0:v:0",
-        "-c:v",
-        "copy",
-    ]
-    if config.audio_codec == "none":
-        args += ["-an"]
-    else:
-        args += [
-            "-map", "0:a:0", "-af", "aresample=48000:async=1:first_pts=0",
-            "-c:a", config.audio_codec, "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        ]
-    args += [
-        "-movflags",
-        "+faststart",
-        "-progress",
-        "pipe:1",
-        "-nostats",
-        str(output),
-    ]
-    yield output, sum(clip_duration(clip, config) for clip in track), args
-
-
 def composition_arguments(columns, duration, output, graph_path, config, peak=None):
     """Stack already normalized columns; preserve their shared render settings."""
-    args = ["-hide_banner", "-n"]
+    args = ["-hide_banner", "-n", "-filter_complex_threads", str(config.filter_threads)]
     filters = []
     for index, path in enumerate(columns):
         args += ["-i", str(path)]
