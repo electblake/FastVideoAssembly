@@ -41,9 +41,10 @@ def mix_peak_arguments(columns, duration):
     args = ["-hide_banner"]
     for path in columns:
         args += ["-i", str(path)]
-    graph = ";".join(f"[{i}:a:0]asetpts=PTS-STARTPTS[a{i}]" for i in range(3))
+    graph = ";".join(f"[{i}:a:0]asetpts=PTS-STARTPTS[a{i}]" for i in range(len(columns)))
     graph += (
-        ";[a0][a1][a2]amix=inputs=3:duration=longest:dropout_transition=0:normalize=1,"
+        ";" + "".join(f"[a{i}]" for i in range(len(columns)))
+        + f"amix=inputs={len(columns)}:duration=longest:dropout_transition=0:normalize=1,"
         f"atrim=duration={duration},"
         "loudnorm=I=-14:TP=-1:LRA=50:linear=false:print_format=json[audio]"
     )

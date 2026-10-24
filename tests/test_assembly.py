@@ -87,7 +87,10 @@ def test_folder_inputs_are_nonrecursive_and_deduplicated(tmp_path):
     assert video_paths([tmp_path, video]) == [video]
 
 
-def test_center_crop_removes_edges_without_padding(tmp_path):
+@pytest.mark.parametrize("columns", [3, 4])
+def test_center_crop_removes_edges_without_padding(tmp_path, columns):
+    width = 1920 // columns
+    height = 1080
     source = tmp_path / "striped.mp4"
     subprocess.run(
         [
@@ -97,7 +100,7 @@ def test_center_crop_removes_edges_without_padding(tmp_path):
             "-f",
             "lavfi",
             "-i",
-            "color=red:s=120x120:r=24:d=0.5,drawbox=x=28:y=0:w=64:h=120:color=lime:t=fill",
+            f"color=red:s=1600x2160:r=24:d=0.5,drawbox=x={800 - width}:y=0:w={width * 2}:h=2160:color=lime:t=fill",
             "-c:v",
             "libx264",
             str(source),
@@ -106,9 +109,9 @@ def test_center_crop_removes_edges_without_padding(tmp_path):
         capture_output=True,
     )
     output = tmp_path / "cropped.mp4"
-    config = RenderConfig(column_width=64, height=120, fps="24", encoder="libx264")
+    config = RenderConfig(column_width=width, height=height, fps="24", encoder="libx264")
     args = column_arguments(
-        [Clip(source, 0.5, 120, 120)], output, tmp_path / "crop.txt", config
+        [Clip(source, 0.5, 1600, 2160)], output, tmp_path / "crop.txt", config
     )
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     frame = subprocess.run(
@@ -129,10 +132,11 @@ def test_center_crop_removes_edges_without_padding(tmp_path):
         check=True,
         capture_output=True,
     ).stdout
-    assert len(frame) == 64 * 120 * 3
-    for x in (4, 32, 59):
-        offset = (60 * 64 + x) * 3
-        assert tuple(frame[offset : offset + 3]) == pytest.approx((0, 255, 0), abs=15)
+    assert len(frame) == width * height * 3
+    for y in (4, height // 2, height - 5):
+        for x in (4, width // 2, width - 5):
+            offset = (y * width + x) * 3
+            assert tuple(frame[offset : offset + 3]) == pytest.approx((0, 255, 0), abs=15)
 
 
 @pytest.mark.parametrize("audio_codec", ["aac", "libmp3lame", "ac3", "eac3"])

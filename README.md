@@ -1,6 +1,6 @@
 # FastVideoAssembly
 
-Native PySide6 application for arranging portrait videos into three timelines
+Native PySide6 application for arranging portrait videos into configurable timelines
 and rendering them side by side. Separate application, settings, entry point,
 Explorer registration, and Windows installer from FastVideoCropper.
 
@@ -33,20 +33,21 @@ and its values reset to defaults once. Window state is saved on close.
 Sorting is enabled once all sources are scanned.
 
 The shared source library lists filenames without assembler-specific labels or
-filtering. The **3 Column Assembly** central tab accepts display aspect ratios
+filtering. The **Column Assembly** central tab accepts display aspect ratios
 below 1; square and landscape clips remain available in the shared source library.
 Rotation metadata and sample aspect ratio are considered. Longest clips are allocated to the currently
 shortest column, then each column is sorted shortest to longest. This is a
 duration-balancing heuristic, not a promise of an optimal equal partition.
 
-All three-column editing and render controls live in that tab. Preview, render,
+All column editing and render controls live in that tab. Preview, render,
 audio, and output settings remain shared docks. Progress appears directly above
 the log inside the shared Activity dock, which opens when processing starts.
 Copy output selects and copies the complete log; Clear output empties it.
 Creating timelines or starting a render clears the log unless Keep logs between
 runs is checked. This checkbox starts unchecked and sits above the action buttons.
-Render progress shows runtime and rendering throughput in frames/s; audio analysis
-and source scanning show completed items/s. ETA appears only in the status bar.
+Render progress shows ETA and rendering throughput in frames/s; audio analysis
+shows ETA and completed items/s, and source scanning shows completed items/s.
+Runtime appears in the status bar during rendering and audio analysis.
 Runtime and throughput exclude paused time.
 
 The central timeline uses a shared seconds axis and duration-scaled blocks,
@@ -67,12 +68,16 @@ assembly without deleting the file or reordering other clips. Use either sorting
 button when you want to redistribute the remaining clips.
 Every timeline must contain a clip before rendering is enabled.
 
-**Divisions** beside the final-cut checkbox defaults to 1. Set it to 2 for six
-balanced timelines (A–F), 3 for nine (A–I), and so on. Changing this setting clears
-the arrangement; Create Timelines or a sort button rebuilds it explicitly.
-Each group of three appears after the previous group on the same three plot rows,
+**Columns** offers 3 (default) or 4, followed by **Divisions**, which defaults to 1.
+The number of timelines is Columns times Divisions. Four columns and two divisions
+produce A-D and E-H, with four plot rows and two horizontal division groups.
+Changing either setting clears the arrangement; Create Timelines or a sort button
+rebuilds it explicitly. Each division appears after the previous group on the same rows,
 separated by a vertical line. Timelines retain their own letter and duration.
 The source list is the only clip list.
+Final output resolution stays fixed: each column receives one third or one quarter
+of its width. At 1920 x 1080 this is 640 or 480 pixels per column; at 3840 x 2160
+it is 1280 or 960 pixels. Columns and the current arrangement persist in active state.
 
 The **Render Settings** dock controls output dimensions (1080p or
 2160p), frame rate, encoder, speed preset and quality. View can reopen the dock;
@@ -88,11 +93,11 @@ Clips scale proportionally to cover the entire column and are center-cropped to
 exact dimensions, without stretching or padding. Square pixels, frame rate and
 pixel format are shared across clips. The first source audio stream is preserved
 in each timeline, normalized to AAC stereo at 48 kHz and 192 kb/s. Clips without
-audio contribute silence for their duration. The final video mixes A/B/C with
+audio contribute silence for their duration. The final video mixes its timelines with
 equal weights using FFmpeg's normalized audio mix; no custom mixing controls yet.
 
 Select **No Audio** in Audio Settings to omit audio tracks from clip intermediates,
-A/B/C timelines, and the final assembly. Audio measurement, normalization, and mixing
+timelines, and the final assembly. Audio measurement, normalization, and mixing
 are skipped in this mode.
 
 The dockable **Audio Settings** panel sits below Render Settings. Its
@@ -136,12 +141,13 @@ For example, project `Holiday` on 2026-10-23 produces
 then `Holiday.Assembly.2026-10-23_FINAL.mp4` when combining is enabled. These playable
 column cuts retain their natural durations and stay beside the final output.
 Uncheck **Create final assembly**, above the render buttons, to produce only these files.
-With multiple divisions, timelines continue as `_D`, `_E`, `_F`, etc. Each triple
-has its own combined output: `_FINAL_ABC`, `_FINAL_DEF`, and so on. A single
-division retains `_FINAL`. Each triple and its optional final finish before the
-next triple starts; all target filenames are checked before rendering begins.
+With multiple divisions, timeline letters continue across groups. Each division
+has its own combined output: `_FINAL_ABC` and `_FINAL_DEF` with three columns,
+or `_FINAL_ABCD` and `_FINAL_EFGH` with four. A single division retains `_FINAL`.
+Each division and its optional final finish before the next division starts;
+all target filenames are checked before rendering begins.
 **Delete timelines after final render** is off by default. When enabled, each completed
-final deletes only its own three rendered timeline files. Failed or stopped finals
+final deletes only its own rendered timeline files. Failed or stopped finals
 retain their timeline files. Source videos are never deleted. The option is disabled
 when final creation is unchecked.
 When checked, a final pass stacks the columns, inheriting the render settings
@@ -149,9 +155,10 @@ without resizing. Shorter columns hold their last frame. This final stage is
 another encode, not stream copy. There is no automatic reuse of prior outputs.
 
 Before rendering, all planned output paths are checked together. If any exist,
-an error lists the conflicting paths and no stage starts. When rendering only
-A/B/C, an existing unused final file does not block the job. FFmpeg also refuses
-to overwrite files created after this preflight check.
+a dialog lists them. Cancel leaves them untouched; Replace files and continue
+allows FFmpeg to overwrite only those listed outputs as their renders start. When rendering only
+timelines, an existing unused final file does not block the job. Outputs not listed
+in the replacement dialog retain FFmpeg's no-overwrite protection.
 Stop rendering sends FFmpeg its normal quit command, retains completed and
 partial files, and does not start later stages. Process diagnostics and exit
 codes remain visible. Each timeline is encoded in one FFmpeg process directly

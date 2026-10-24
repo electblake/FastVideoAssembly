@@ -1,4 +1,4 @@
-"""Video metadata, balanced ordering, and the three-column FFmpeg composition."""
+"""Video metadata, balanced ordering, and the column FFmpeg composition."""
 
 from dataclasses import dataclass
 from fractions import Fraction
@@ -215,10 +215,11 @@ def composition_arguments(columns, duration, output, graph_path, config, peak=No
         )
         if config.audio_codec != "none":
             filters.append(f"[{index}:a:0]asetpts=PTS-STARTPTS[audio{index}]")
-    filters.append("[column0][column1][column2]hstack=inputs=3[output]")
+    filters.append("".join(f"[column{i}]" for i in range(len(columns))) + f"hstack=inputs={len(columns)}[output]")
     if config.audio_codec != "none":
         filters.append(
-            "[audio0][audio1][audio2]amix=inputs=3:duration=longest:"
+            "".join(f"[audio{i}]" for i in range(len(columns)))
+            + f"amix=inputs={len(columns)}:duration=longest:"
             f"dropout_transition=0:normalize=1,atrim=duration={duration},"
             f"{normalization_filter(config.normalization, peak)},apad[audio]"
         )

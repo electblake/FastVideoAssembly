@@ -1,8 +1,9 @@
-"""Three-column assembler tab; portrait eligibility is local to this assembler."""
+"""Column assembler tab; portrait eligibility is local to this assembler."""
 
 import pyqtgraph as pg
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QGridLayout,
     QLabel,
     QPushButton,
@@ -17,17 +18,22 @@ from .assembly import balance
 class ThreeColumnAssembly(QWidget):
     def __init__(self, controller):
         super().__init__()
+        self.columns = QComboBox()
+        self.columns.addItem("3", 3)
+        self.columns.addItem("4", 4)
+        self.columns.setCurrentIndex(self.columns.findData(controller.settings.value("assembly/columns", 3, type=int)))
+        self.columns.setAccessibleName("Columns")
         self.divisions = QSpinBox()
         self.divisions.setRange(1, 100)
         self.divisions.setValue(controller.settings.value("assembly/divisions", 1, type=int))
         self.divisions.setAccessibleName("Divisions")
-        self.tracks = [[] for _ in range(3 * self.divisions.value())]
+        self.tracks = [[] for _ in range(self.columns.currentData() * self.divisions.value())]
         self.active_column = -1
         self.active_row = -1
         layout = QVBoxLayout(self)
         self.timeline = pg.PlotWidget()
         self.timeline.setAccessibleName(
-            "Three tracks with a shared time axis in seconds"
+            "Timelines with a shared time axis in seconds"
         )
         self.timeline.setMinimumHeight(180)
         self.timeline.setLabel("bottom", "Time", units="s")
@@ -72,18 +78,21 @@ class ThreeColumnAssembly(QWidget):
         layout.addLayout(edit_buttons)
         final_row = QGridLayout()
         final_row.addWidget(controller.combine, 0, 0)
-        final_row.addWidget(QLabel("Divisions"), 0, 1)
-        final_row.addWidget(self.divisions, 0, 2)
+        final_row.addWidget(QLabel("Columns"), 0, 1)
+        final_row.addWidget(self.columns, 0, 2)
+        final_row.addWidget(QLabel("Divisions"), 0, 3)
+        final_row.addWidget(self.divisions, 0, 4)
         self.remove_timelines = QCheckBox("Delete timelines after final render")
         self.remove_timelines.setChecked(controller.settings.value("assembly/removeTimelines", False, type=bool))
         self.remove_timelines.toggled.connect(
             lambda checked: controller.settings.setValue("assembly/removeTimelines", checked)
         )
-        final_row.addWidget(self.remove_timelines, 1, 0, 1, 3)
+        final_row.addWidget(self.remove_timelines, 1, 0, 1, 5)
         controller.combine.toggled.connect(controller.update_enabled)
-        final_row.setColumnStretch(3, 1)
+        final_row.setColumnStretch(5, 1)
         layout.addLayout(final_row)
         self.divisions.valueChanged.connect(controller.divisions_changed)
+        self.columns.currentIndexChanged.connect(controller.columns_changed)
         self.keep_logs = QCheckBox("Keep logs between runs")
         layout.addWidget(self.keep_logs)
         export_row = QGridLayout()
@@ -125,5 +134,5 @@ class ThreeColumnAssembly(QWidget):
     def rebalance(self, clips, longest_first=False):
         self.tracks = balance(
             [clip for clip in clips if clip.portrait], longest_first=longest_first,
-            track_count=3 * self.divisions.value()
+            track_count=self.columns.currentData() * self.divisions.value()
         )

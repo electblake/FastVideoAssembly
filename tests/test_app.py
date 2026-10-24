@@ -17,7 +17,7 @@ def test_collision_stops_before_any_render(controller, tmp_path, monkeypatch, su
     collision = tmp_path / f"assembly{suffix}.mp4"
     collision.write_bytes(b"existing output")
     error = Mock()
-    monkeypatch.setattr(app.QMessageBox, "critical", error)
+    monkeypatch.setattr(app.QMessageBox, "exec", lambda dialog: error(dialog))
     launch = Mock()
     monkeypatch.setattr(controller, "start_export_job", launch)
     controller.start_export(output)
@@ -25,7 +25,46 @@ def test_collision_stops_before_any_render(controller, tmp_path, monkeypatch, su
     assert not controller.running
     assert controller.export_directory is None
     assert collision.read_bytes() == b"existing output"
-    assert str(collision) in error.call_args.args[2]
+    dialog = error.call_args.args[0]
+    assert str(collision) in dialog.text()
+    assert dialog.defaultButton() is dialog.button(app.QMessageBox.StandardButton.Cancel)
+    assert dialog.escapeButton() is dialog.button(app.QMessageBox.StandardButton.Cancel)
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+@pytest.mark.parametrize("divisions", [1, 2])
+def test_replace_conflicting_outputs_and_continue(controller, preview_source, tmp_path, qtbot, monkeypatch, columns, divisions):
+    output = tmp_path / "replace.mp4"
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(divisions)
+    letters = "ABCDEFGH"[:columns * divisions]
+    suffix = "" if divisions == 1 else "_" + letters[-columns:]
+    existing = [tmp_path / f"replace_{letters[-1]}.mp4", tmp_path / f"replace_FINAL{suffix}.mp4"]
+    for path in existing:
+        path.write_bytes(b"old output")
+    unrelated = tmp_path / "unrelated.mp4"
+    unrelated.write_bytes(b"keep this")
+    controller.assembler.tracks = [[Clip(preview_source, 0.5, 60, 120, True)] for _ in range(columns * divisions)]
+    config = RenderConfig(column_width=60, height=120, encoder="libx264", speed="fast", normalization="True Peak")
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+
+    def replace(dialog):
+        next(button for button in dialog.buttons() if button.text() == "Replace files and continue").click()
+        return 0
+
+    monkeypatch.setattr(app.QMessageBox, "exec", replace)
+    start = Mock(wraps=controller.process.start)
+    monkeypatch.setattr(controller.process, "start", start)
+    controller.start_export(output)
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert controller.process.exitCode() == 0
+    assert controller.replace_outputs == set(existing)
+    for call in start.call_args_list:
+        args = call.args[1]
+        assert ("-y" in args) == (Path(args[-1]) in existing)
+        assert ("-n" in args) == (Path(args[-1]) not in existing)
+    assert all(path.read_bytes() != b"old output" for path in existing)
+    assert unrelated.read_bytes() == b"keep this"
 
 
 def test_columns_only_does_not_check_unused_final(controller, tmp_path, monkeypatch):
@@ -182,18 +221,20 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
     controller.measurement_keys = {0: tmp_path / "audio.mp4"}
     controller.export_index = 0
     controller.start_export_job()
-    assert "Runtime 00:00:00" in controller.progress.text()
-    assert "ETA" not in controller.progress.text()
-    assert "ETA --:--:--" in controller.window.statusBar().currentMessage()
+    assert "ETA --:--:--" in controller.progress.text()
+    assert "Runtime" not in controller.progress.text()
+    assert "Runtime 00:00:00" in controller.window.statusBar().currentMessage()
+    assert "ETA" not in controller.window.statusBar().currentMessage()
     clock[0] = 110
     process.readAllStandardOutput.return_value = b"out_time_us=50000000\n"
     controller.read_progress()
     assert controller.progress.value() == 250
-    assert "Runtime 00:00:10" in controller.progress.text()
-    assert "ETA 00:00:30" in controller.window.statusBar().currentMessage()
+    assert "ETA 00:00:30" in controller.progress.text()
+    assert "Runtime 00:00:10" in controller.window.statusBar().currentMessage()
     clock[0] = 111
     controller.runtime_timer.timeout.emit()
-    assert "Runtime 00:00:11" in controller.progress.text()
+    assert "ETA 00:00:33" in controller.progress.text()
+    assert "Runtime 00:00:11" in controller.window.statusBar().currentMessage()
     assert controller.progress.value() == 250
     controller.export_index = 1
     controller.start_export_job()
@@ -218,9 +259,9 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
         controller.start_export_job()
         assert controller.progress.value() == 0
         assert controller.progress.text().startswith(name)
-        assert "Runtime 00:00:00" in controller.progress.text()
+        assert "ETA --:--:--" in controller.progress.text()
         assert controller.progress.text().endswith(" - 0.0 frames/s")
-        assert "ETA --:--:--" in controller.window.statusBar().currentMessage()
+        assert "Runtime 00:00:00" in controller.window.statusBar().currentMessage()
 
 
 @pytest.mark.parametrize("stopped,exit_code", [(False, 0), (True, 0), (False, 1)])
@@ -808,7 +849,7 @@ def test_empty_and_editable_tracks(controller):
 def test_assembler_tab_and_shared_process_dock(controller):
     assert controller.window.centralWidget() is controller.assembler_tabs
     assert controller.assembler_tabs.count() == 1
-    assert controller.assembler_tabs.tabText(0) == "3 Column Assembly"
+    assert controller.assembler_tabs.tabText(0) == "Column Assembly"
     assert controller.assembler_tabs.widget(0) is controller.assembler
     for widget in (
         controller.assembler.timeline,
@@ -1534,7 +1575,10 @@ def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtb
 def test_final_checkbox_placement_and_busy_lock(controller):
     assert controller.combine.text() == 'Create final assembly'
     layout = controller.assembler.layout()
-    assert layout.itemAt(layout.count() - 2).layout().itemAt(0).widget() is controller.combine
+    options = layout.itemAt(layout.count() - 3).layout()
+    assert options.itemAtPosition(0, 0).widget() is controller.combine
+    assert options.itemAtPosition(0, 2).widget() is controller.assembler.columns
+    assert options.itemAtPosition(0, 4).widget() is controller.assembler.divisions
     assert controller.assembler.isAncestorOf(controller.combine)
     assert not controller.render_panel.isAncestorOf(controller.combine)
     controller.combine.setChecked(False)
@@ -1648,47 +1692,87 @@ def test_divisions_balance_display_selection_and_settings(controller, tmp_path, 
 
 @pytest.mark.parametrize('combine', [False, True])
 @pytest.mark.parametrize('audio_codec', ['none', 'aac'])
-def test_two_divisions_render_independent_triples(controller, preview_source, tmp_path, qtbot, monkeypatch, combine, audio_codec):
+@pytest.mark.parametrize('columns', [3, 4])
+def test_two_divisions_render_independent_triples(controller, preview_source, tmp_path, qtbot, monkeypatch, combine, audio_codec, columns):
     import json
 
     controller.assembler.divisions.setValue(2)
+    controller.assembler.columns.setCurrentText(str(columns))
     controller.combine.setChecked(combine)
     config = RenderConfig(column_width=60, height=120, encoder='libx264', speed='fast', normalization='True Peak', audio_codec=audio_codec)
     monkeypatch.setattr(controller, 'render_config', lambda: config)
     clips = []
-    for i in range(6):
+    for i in range(columns * 2):
         path = tmp_path / f'source{i}.mp4'
         path.hardlink_to(preview_source)
         clips.append(Clip(path, 0.5 + i / 10, 60, 120, True))
     controller.assembler.tracks = [[clip] for clip in clips]
     controller.start_export(tmp_path / 'division.mp4')
     assert not controller.assembler.divisions.isEnabled()
-    expected_groups = ['A', 'B', 'C'] + (['FINAL ABC'] if combine else []) + ['D', 'E', 'F'] + (['FINAL DEF'] if combine else [])
+    assert not controller.assembler.columns.isEnabled()
+    letters = 'ABCDEFGH'[:columns * 2]
+    first, second = letters[:columns], letters[columns:]
+    expected_groups = list(first) + ([f'FINAL {first}'] if combine else []) + list(second) + ([f'FINAL {second}'] if combine else [])
     assert [group[0] for group in controller.export_groups] == expected_groups
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0
-    outputs = list('ABCDEF') + (['FINAL_ABC', 'FINAL_DEF'] if combine else [])
+    outputs = list(letters) + ([f'FINAL_{first}', f'FINAL_{second}'] if combine else [])
     assert {p.stem for p in tmp_path.glob('division_*.mp4')} == {f'division_{suffix}' for suffix in outputs}
     for suffix in outputs:
         data = json.loads(subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(tmp_path / f'division_{suffix}.mp4')], capture_output=True, text=True, check=True).stdout)
         assert [stream['codec_type'] for stream in data['streams']] == (['video'] if audio_codec == 'none' else ['video', 'audio'])
-        assert data['streams'][0]['width'] == (180 if suffix.startswith('FINAL') else 60)
+        assert data['streams'][0]['width'] == (60 * columns if suffix.startswith('FINAL') else 60)
         if suffix.startswith('FINAL'):
-            assert float(data['format']['duration']) == pytest.approx(0.7 if suffix.endswith('ABC') else 1.0, abs=0.06)
+            assert float(data['format']['duration']) == pytest.approx(0.5 + (columns - 1 if suffix.endswith(first) else columns * 2 - 1) / 10, abs=0.06)
     assert controller.assembler.divisions.isEnabled()
+    assert controller.assembler.columns.isEnabled()
 
 
-def test_collision_in_later_division_blocks_entire_export(controller, tmp_path, monkeypatch):
+def test_four_columns_layout_and_persistence(controller, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(controller.preview, "set_clip", Mock())
+    assert [controller.assembler.columns.itemText(i) for i in range(controller.assembler.columns.count())] == ["3", "4"]
+    assert controller.assembler.columns.currentData() == 3
     controller.assembler.divisions.setValue(2)
-    existing = tmp_path / 'assembly_FINAL_DEF.mp4'
+    controller.assembler.columns.setCurrentText("4")
+    assert len(controller.assembler.tracks) == 8
+    assert controller.render_config().column_width == 480
+    controller.resolution.setCurrentIndex(1)
+    assert controller.render_config().column_width == 960
+    controller.clips = [Clip(tmp_path / f"four{i}.mp4", i + 1, 60, 120) for i in range(16)]
+    controller.rebalance()
+    assert len(controller.assembler.dividers) == 1
+    assert len(controller.assembler.track_labels) == 8
+    for column in range(8):
+        _, start, end, clip = next(bound for bound in controller.assembler.segment_bounds if bound[0] == column)
+        event = Mock()
+        event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF((start + end) / 2, 3 - column % 4))
+        controller.timeline_clicked(event)
+        assert controller.selected_clip == clip
+        assert controller.assembler.active_column == column
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.columns.currentData() == 4
+    assert restored.assembler.divisions.value() == 2
+    assert restored.assembler.tracks == controller.assembler.tracks
+    assert restored.render_config().column_width == 960
+    restored.assembler.columns.setCurrentText("3")
+    assert restored.assembler.tracks == [[] for _ in range(6)]
+    assert restored.render_config().column_width == 1280
+
+
+@pytest.mark.parametrize("columns, suffix", [(3, "DEF"), (4, "EFGH")])
+def test_collision_in_later_division_blocks_entire_export(controller, tmp_path, monkeypatch, columns, suffix):
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    existing = tmp_path / f"assembly_FINAL_{suffix}.mp4"
     existing.touch()
     error = Mock()
-    monkeypatch.setattr(app.QMessageBox, 'critical', error)
+    monkeypatch.setattr(app.QMessageBox, 'exec', lambda dialog: error(dialog))
     launch = Mock()
     monkeypatch.setattr(controller, 'start_export_job', launch)
     controller.start_export(tmp_path / 'assembly.mp4')
     launch.assert_not_called()
-    assert str(existing) in error.call_args.args[2]
+    assert str(existing) in error.call_args.args[0].text()
 
 
 def test_remove_timelines_default_persistence_and_enabled_state(controller, qtbot):
@@ -1710,26 +1794,30 @@ def test_remove_timelines_default_persistence_and_enabled_state(controller, qtbo
     assert restored.assembler.remove_timelines.isChecked()
 
 
+@pytest.mark.parametrize('columns', [3, 4])
 @pytest.mark.parametrize('outcome', ['success', 'failure', 'stopped'])
-def test_final_cleanup_is_per_division_and_only_after_success(controller, preview_source, tmp_path, qtbot, monkeypatch, outcome):
+def test_final_cleanup_is_per_division_and_only_after_success(controller, preview_source, tmp_path, qtbot, monkeypatch, outcome, columns):
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    first_letters = 'ABCDEFGH'[:columns]
+    second_letters = 'ABCDEFGH'[columns:columns * 2]
     controller.assembler.divisions.setValue(2)
     controller.assembler.remove_timelines.setChecked(True)
     config = RenderConfig(column_width=60, height=120, encoder='libx264', speed='fast', normalization='True Peak')
     monkeypatch.setattr(controller, 'render_config', lambda: config)
-    controller.assembler.tracks = [[Clip(preview_source, 0.5, 60, 120, True)] for _ in range(6)]
-    first = tmp_path / 'cleanup_FINAL_ABC.mp4'
-    second = tmp_path / 'cleanup_FINAL_DEF.mp4'
+    controller.assembler.tracks = [[Clip(preview_source, 0.5, 60, 120, True)] for _ in range(columns * 2)]
+    first = tmp_path / f"cleanup_FINAL_{first_letters}.mp4"
+    second = tmp_path / f"cleanup_FINAL_{second_letters}.mp4"
     start = controller.start_export_job
     checked = []
 
     def next_job():
         path, duration, _args = controller.export_jobs[controller.export_index]
         if path == second or path == first:
-            letters = 'ABC' if path == first else 'DEF'
+            letters = first_letters if path == first else second_letters
             assert all((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in letters)
-        if path == tmp_path / 'cleanup_D.mp4':
+        if path == tmp_path / f"cleanup_{second_letters[0]}.mp4":
             assert first.exists()
-            assert not any((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in 'ABC')
+            assert not any((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in first_letters)
             checked.append('first complete')
         final_render = path == second and controller.export_index not in controller.measurement_keys
         if final_render and outcome == 'failure':
@@ -1743,8 +1831,8 @@ def test_final_cleanup_is_per_division_and_only_after_success(controller, previe
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert checked == ['first complete']
     assert first.exists()
-    assert not any((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in 'ABC')
-    assert all((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in 'DEF') == (outcome != 'success')
+    assert not any((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in first_letters)
+    assert all((tmp_path / f'cleanup_{letter}.mp4').exists() for letter in second_letters) == (outcome != 'success')
     if outcome == 'success':
         assert second.exists()
         assert controller.process.exitCode() == 0

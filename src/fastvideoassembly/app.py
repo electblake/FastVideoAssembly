@@ -117,6 +117,7 @@ class Application(QObject):
         self.process.readyReadStandardError.connect(self.read_log)
         self.process.finished.connect(self.finished)
         self.measurement_processes = {}
+        self.replace_outputs = set()
         self.runtime_timer = QTimer(self.window)
         self.runtime_timer.setInterval(1000)
         self.runtime_timer.timeout.connect(self.update_runtime)
@@ -263,7 +264,7 @@ class Application(QObject):
 
         self.assembler_tabs = QTabWidget()
         self.assembler = ThreeColumnAssembly(self)
-        self.assembler_tabs.addTab(self.assembler, "3 Column Assembly")
+        self.assembler_tabs.addTab(self.assembler, "Column Assembly")
         self.window.setCentralWidget(self.assembler_tabs)
         process_panel = QWidget()
         process_layout = QVBoxLayout(process_panel)
@@ -297,8 +298,8 @@ class Application(QObject):
         self.render_panel = QWidget()
         form = QFormLayout(self.render_panel)
         self.resolution = QComboBox()
-        self.resolution.addItem("1920 x 1080 (640 x 1080 per column)", [640, 1080])
-        self.resolution.addItem("3840 x 2160 (1280 x 2160 per column)", [1280, 2160])
+        self.resolution.addItem("1920 x 1080", [1920, 1080])
+        self.resolution.addItem("3840 x 2160", [3840, 2160])
         self.frame_rate = QComboBox()
         for label, value in [
             ("23.976", "24000/1001"),
@@ -325,7 +326,7 @@ class Application(QObject):
             for key, value in asdict(RenderConfig()).items()
         })
         self.resolution.setCurrentIndex(
-            self.resolution.findData([saved.column_width, saved.height])
+            self.resolution.findData([saved.column_width * self.settings.value("assembly/columns", 3, type=int), saved.height])
         )
         self.frame_rate.setCurrentIndex(self.frame_rate.findData(saved.fps))
         self.encoder.setCurrentIndex(self.encoder.findData(saved.encoder))
@@ -508,7 +509,7 @@ class Application(QObject):
     def render_config(self):
         width, height = self.resolution.currentData()
         return RenderConfig(
-            width,
+            width // self.assembler.columns.currentData(),
             height,
             self.frame_rate.currentData(),
             self.encoder.currentData(),
@@ -712,7 +713,7 @@ class Application(QObject):
     def clear(self):
         self.selected_clip = None
         self.clips.clear()
-        self.assembler.tracks = [[] for _ in range(3 * self.assembler.divisions.value())]
+        self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * self.assembler.divisions.value())]
         self.save_active_state()
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
@@ -722,9 +723,15 @@ class Application(QObject):
 
     def divisions_changed(self, value):
         self.settings.setValue("assembly/divisions", value)
-        self.assembler.tracks = [[] for _ in range(3 * value)]
+        self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * value)]
         self.save_active_state()
         self.refresh()
+
+    def columns_changed(self):
+        self.settings.setValue("assembly/columns", self.assembler.columns.currentData())
+        self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * self.assembler.divisions.value())]
+        self.render_settings_changed()
+        self.save_active_state()
 
     def rebalance(self, longest_first=False):
         self.assembler.rebalance(self.clips, longest_first=longest_first)
@@ -766,15 +773,16 @@ class Application(QObject):
         self.assembler.dividers = []
         self.assembler.track_labels = []
         offset = 0.0
-        for group_start in range(0, len(self.assembler.tracks), 3):
+        columns = self.assembler.columns.currentData()
+        for group_start in range(0, len(self.assembler.tracks), columns):
             self.assembler.division_offsets.append(offset)
             if group_start:
                 divider = pg.InfiniteLine(offset, angle=90, pen=pg.mkPen(palette.text().color(), width=2))
                 self.assembler.timeline.addItem(divider)
                 self.assembler.dividers.append(divider)
-            for column in range(group_start, group_start + 3):
+            for column in range(group_start, group_start + columns):
                 track = self.assembler.tracks[column]
-                y = 2 - column % 3
+                y = columns - 1 - column % columns
                 heading = pg.TextItem(
                     f"{timeline_name(column)} - {len(track)} clips - {timestamp(durations[column])}",
                     color=palette.text().color(), anchor=(0, 1),
@@ -800,8 +808,8 @@ class Application(QObject):
                     label.setPos(start + duration / 2, y)
                     self.assembler.timeline.addItem(label)
                     start += duration
-            offset += max(1, max(durations[group_start:group_start + 3]))
-        self.assembler.timeline.setYRange(-0.6, 2.8, padding=0)
+            offset += max(1, max(durations[group_start:group_start + columns]))
+        self.assembler.timeline.setYRange(-0.6, columns - 0.2, padding=0)
         self.assembler.timeline.setXRange(0, offset, padding=0.02)
         self.select_clip(self.selected_clip)
         self.library.blockSignals(True)
@@ -886,10 +894,11 @@ class Application(QObject):
         if self.running or self.loading:
             return
         point = self.assembler.timeline.getViewBox().mapSceneToView(event.scenePos())
-        row = 2 - round(point.y())
-        if row in range(3) and abs(point.y() - (2 - row)) <= 0.325:
+        columns = self.assembler.columns.currentData()
+        row = columns - 1 - round(point.y())
+        if row in range(columns) and abs(point.y() - (columns - 1 - row)) <= 0.325:
             for column, start, end, clip in self.assembler.segment_bounds:
-                if column % 3 == row and start <= point.x() < end:
+                if column % columns == row and start <= point.x() < end:
                     self.select_clip(clip)
                     break
 
@@ -921,6 +930,7 @@ class Application(QObject):
         self.parallel_scanning.setEnabled(idle)
         self.scan_threads.setEnabled(idle)
         self.assembler.divisions.setEnabled(idle)
+        self.assembler.columns.setEnabled(idle)
         column = self.assembler.active_column
         row = self.assembler.active_row
         selected = idle and row >= 0 and len(self.library.selectedItems()) == 1
@@ -944,24 +954,34 @@ class Application(QObject):
 
     def start_export(self, output):
         count = len(self.assembler.tracks)
+        columns_per_division = self.assembler.columns.currentData()
         columns = [output.with_name(f"{output.stem}_{timeline_name(index)}.mp4") for index in range(count)]
         finals = [
             output.with_name(f"{output.stem}_FINAL{suffix}.mp4")
-            for suffix in ([""] if count == 3 else [
-                "_" + "".join(timeline_name(index) for index in range(start, start + 3))
-                for start in range(0, count, 3)
+            for suffix in ([""] if count == columns_per_division else [
+                "_" + "".join(timeline_name(index) for index in range(start, start + columns_per_division))
+                for start in range(0, count, columns_per_division)
             ])
         ]
         targets = columns + (finals if self.combine.isChecked() else [])
         existing = [path for path in targets if path.exists()]
+        self.replace_outputs = set()
         if existing:
-            QMessageBox.critical(
-                self.window,
-                "Output files already exist",
-                "Rendering was not started. Move or delete these files, or choose a different output name:\n\n"
-                + "\n".join(str(path) for path in existing),
+            dialog = QMessageBox(self.window)
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setWindowTitle("Output files already exist")
+            dialog.setText(
+                "Replace these files and continue rendering?\n\n"
+                + "\n".join(str(path) for path in existing)
             )
-            return
+            replace = dialog.addButton("Replace files and continue", QMessageBox.ButtonRole.AcceptRole)
+            cancel = dialog.addButton(QMessageBox.StandardButton.Cancel)
+            dialog.setDefaultButton(cancel)
+            dialog.setEscapeButton(cancel)
+            dialog.exec()
+            if dialog.clickedButton() != replace:
+                return
+            self.replace_outputs = set(existing)
         self.export_directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-")
         graph_root = Path(self.export_directory.name)
         config = self.render_config()
@@ -975,8 +995,8 @@ class Application(QObject):
         ]
         scheduled_measurements = set()
         self.column_cleanup = {}
-        for division_start in range(0, count, 3):
-            for index in range(division_start, division_start + 3):
+        for division_start in range(0, count, columns_per_division):
+            for index in range(division_start, division_start + columns_per_division):
                 track, path = self.assembler.tracks[index], columns[index]
                 group_start = len(self.export_jobs)
                 graph_path = graph_root / f"column{index}.ffgraph"
@@ -999,9 +1019,9 @@ class Application(QObject):
                 ))
                 self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
             if self.combine.isChecked():
-                output = finals[division_start // 3]
-                group_columns = columns[division_start:division_start + 3]
-                duration = max(durations[division_start:division_start + 3])
+                output = finals[division_start // columns_per_division]
+                group_columns = columns[division_start:division_start + columns_per_division]
+                duration = max(durations[division_start:division_start + columns_per_division])
                 group_start = len(self.export_jobs)
                 if config.audio_codec != "none" and config.normalization == "True Peak":
                     self.measurement_keys[len(self.export_jobs)] = output
@@ -1017,13 +1037,13 @@ class Application(QObject):
                     group_columns,
                     duration,
                     output,
-                    graph_root / f"composition{division_start // 3}.ffgraph",
+                    graph_root / f"composition{division_start // columns_per_division}.ffgraph",
                     config,
                 )
                 self.export_jobs.append((output, duration, args))
                 if self.assembler.remove_timelines.isChecked():
                     self.column_cleanup[len(self.export_jobs) - 1] = group_columns
-                self.export_groups.append(("FINAL" if count == 3 else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + 3)), group_start, len(self.export_jobs)))
+                self.export_groups.append(("FINAL" if count == columns_per_division else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + columns_per_division)), group_start, len(self.export_jobs)))
         self.export_index = 0
         self.stop_requested = False
         self.render_paused = False
@@ -1071,6 +1091,8 @@ class Application(QObject):
             self.start_measurement_batch()
             return
         self.log.appendPlainText(f"{operation} {path}\n")
+        if path in self.replace_outputs:
+            args[args.index("-n")] = "-y"
         self.process.start(self.ffmpeg, args)
 
     def start_measurement_batch(self):
@@ -1165,21 +1187,24 @@ class Application(QObject):
         completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
         fraction = completed / total
         self.progress.setValue(min(999, int(fraction * 1000)) if fraction < 1 else 1000)
-        eta = timestamp((monotonic() - self.group_started) * (total - completed) / completed) if completed else "--:--:--"
         self.update_runtime()
-        self.window.statusBar().showMessage(
-            f"{self.stage_description}. ETA {eta}"
-        )
 
     def update_runtime(self):
-        elapsed = timestamp(monotonic() - self.group_started)
+        elapsed_seconds = monotonic() - self.group_started
+        elapsed = timestamp(elapsed_seconds)
+        total = sum(job[1] for job in self.export_jobs[self.group_start:self.group_end])
+        completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
+        eta = timestamp(elapsed_seconds * (total - completed) / completed) if completed else "--:--:--"
         if self.measuring_audio:
             rate = self.audio_items_processed / (monotonic() - self.audio_analysis_started) if self.audio_items_processed else 0.0
             throughput = f"{rate:.1f} it/s"
         else:
             throughput = f"{self.render_frames_per_second:.1f} frames/s"
         self.progress.setFormat(
-            f"{self.group_name} - %p% - Runtime {elapsed} - {throughput}"
+            f"{self.group_name} - %p% - ETA {eta} - {throughput}"
+        )
+        self.window.statusBar().showMessage(
+            f"{self.stage_description}. Runtime {elapsed}"
         )
 
     def read_log(self):

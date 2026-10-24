@@ -117,7 +117,8 @@ def test_normalization_levels_and_silence(mode, tmp_path):
 
 
 @pytest.mark.parametrize("mode", ["True Peak", "YouTube"])
-def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
+@pytest.mark.parametrize("count", [3, 4])
+def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch, count):
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -167,7 +168,7 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
         {source: peak},
     )
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
-    columns = [column] * 3
+    columns = [column] * count
     measurement = subprocess.run(
         ["ffmpeg", *mix_peak_arguments(columns, 4)],
         check=True,
@@ -201,8 +202,9 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
     controller = app.Application()
     qtbot.addWidget(controller.window)
     controller.normalization.setCurrentText(mode)
+    controller.assembler.columns.setCurrentText(str(count))
     monkeypatch.setattr(controller, "render_config", lambda: config)
-    controller.assembler.tracks = [[clip], [clip], [clip]]
+    controller.assembler.tracks = [[clip] for _ in range(count)]
     gui_output = tmp_path / "queued.mp4"
     controller.start_export(gui_output)
     gui_output = tmp_path / "queued_FINAL.mp4"
