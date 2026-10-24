@@ -181,6 +181,9 @@ class Application(QObject):
         self.remove_sources_button = QPushButton("Remove Selected Clips")
         self.remove_sources_button.clicked.connect(self.remove_selected_clip)
         library_layout.addWidget(self.remove_sources_button)
+        self.clear_sources_button = QPushButton("Clear All Sources")
+        self.clear_sources_button.clicked.connect(self.clear)
+        library_layout.addWidget(self.clear_sources_button)
         self.library_dock = QDockWidget("Source videos", self.window)
         self.library_dock.setObjectName("sourceVideos")
         self.library_dock.setWidget(library_widget)
@@ -287,6 +290,7 @@ class Application(QObject):
         codec_form = QFormLayout()
         self.audio_codec = QComboBox()
         for label, value in (
+            ("No Audio", "none"),
             ("AAC", "aac"),
             ("MP3", "libmp3lame"),
             ("AC-3", "ac3"),
@@ -371,6 +375,7 @@ class Application(QObject):
             self.output_folder.setText(folder)
 
     def audio_settings_changed(self):
+        self.normalization.setEnabled(self.audio_codec.currentData() != "none")
         mode = self.normalization.currentText()
         self.settings.setValue("audio/normalization", mode)
         self.settings.setValue("audio/codec", self.audio_codec.currentData())
@@ -503,6 +508,10 @@ class Application(QObject):
         self.settings.setValue("sources/paths", [])
         self.settings.sync()
         self.assembler.tracks = [[], [], []]
+        self.progress.setRange(0, 1000)
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self.window.statusBar().showMessage("Ready")
         self.refresh()
 
     def rebalance(self, longest_first=False):
@@ -712,6 +721,7 @@ class Application(QObject):
             else "Remove Selected Clip"
         )
         self.remove_sources_button.setEnabled(removable)
+        self.clear_sources_button.setEnabled(idle and bool(self.clips))
         for listing in self.assembler.lists:
             listing.setEnabled(idle)
         column = self.assembler.active_column
@@ -771,7 +781,8 @@ class Application(QObject):
             temporary_paths = [manifest]
             for clip, job in zip(track, jobs[:-1]):
                 if (
-                    config.normalization == "True Peak"
+                    config.audio_codec != "none"
+                    and config.normalization == "True Peak"
                     and clip.has_audio
                     and clip.path not in scheduled_measurements
                 ):
@@ -787,7 +798,7 @@ class Application(QObject):
             self.export_groups.append(("ABC"[index], group_start, len(self.export_jobs)))
         if self.combine.isChecked():
             group_start = len(self.export_jobs)
-            if config.normalization == "True Peak":
+            if config.audio_codec != "none" and config.normalization == "True Peak":
                 self.measurement_keys[len(self.export_jobs)] = output
                 self.export_jobs.append(
                     (
@@ -831,6 +842,7 @@ class Application(QObject):
         if callable(args):
             if (
                 args.func is composition_arguments
+                and self.render_config().audio_codec != "none"
                 and self.render_config().normalization == "True Peak"
             ):
                 args = args(peak=self.audio_peaks[path])

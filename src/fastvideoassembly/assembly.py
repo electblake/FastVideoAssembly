@@ -102,18 +102,11 @@ class RenderConfig:
         return "yuv420p10le" if self.encoder == "hevc_nvenc" else "yuv420p"
 
     def encoding_arguments(self):
-        args = [
-            "-c:v",
-            self.encoder,
-            "-c:a",
-            self.audio_codec,
-            "-b:a",
-            "192k",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-        ]
+        args = ["-c:v", self.encoder]
+        if self.audio_codec == "none":
+            args += ["-an"]
+        else:
+            args += ["-c:a", self.audio_codec, "-b:a", "192k", "-ar", "48000", "-ac", "2"]
         if self.encoder == "libx264":
             preset = {"fast": "veryfast", "balanced": "medium", "quality": "slow"}[
                 self.speed
@@ -166,7 +159,7 @@ def clip_arguments(clip, output, graph_path, config, peaks=None):
             f"tpad=stop_mode=clone:stop=-1,trim=duration={duration}[output]"
         )
     ]
-    if clip.has_audio:
+    if config.audio_codec != "none" and clip.has_audio:
         peak = peaks[clip.path] if config.normalization == "True Peak" else None
         normalize = normalization_filter(config.normalization, peak)
         filters.append(
@@ -175,7 +168,7 @@ def clip_arguments(clip, output, graph_path, config, peaks=None):
             f"atrim=duration={clip.duration},{normalize},"
             f"apad,atrim=duration={duration}[audio]"
         )
-    else:
+    elif config.audio_codec != "none":
         filters.append(
             "anullsrc=r=48000:cl=stereo,"
             f"atrim=duration={duration},asetpts=PTS-STARTPTS[audio]"
@@ -191,11 +184,11 @@ def clip_arguments(clip, output, graph_path, config, peaks=None):
             str(graph_path),
             "-map",
             "[output]",
-            "-map",
-            "[audio]",
         ]
+        + (["-map", "[audio]"] if config.audio_codec != "none" else [])
         + config.encoding_arguments()
-        + ["-c:a", "pcm_s24le", str(output)]
+        + (["-c:a", "pcm_s24le"] if config.audio_codec != "none" else [])
+        + [str(output)]
     )
 
 
@@ -229,20 +222,17 @@ def column_jobs(track, output, manifest, config, peaks=None):
         str(manifest),
         "-map",
         "0:v:0",
-        "-map",
-        "0:a:0",
         "-c:v",
         "copy",
-        "-af",
-        "aresample=48000:async=1:first_pts=0",
-        "-c:a",
-        config.audio_codec,
-        "-b:a",
-        "192k",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
+    ]
+    if config.audio_codec == "none":
+        args += ["-an"]
+    else:
+        args += [
+            "-map", "0:a:0", "-af", "aresample=48000:async=1:first_pts=0",
+            "-c:a", config.audio_codec, "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        ]
+    args += [
         "-movflags",
         "+faststart",
         "-progress",
@@ -262,13 +252,15 @@ def composition_arguments(columns, duration, output, graph_path, config, peak=No
         filters.append(
             f"[{index}:v:0]setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1[column{index}]"
         )
-        filters.append(f"[{index}:a:0]asetpts=PTS-STARTPTS[audio{index}]")
+        if config.audio_codec != "none":
+            filters.append(f"[{index}:a:0]asetpts=PTS-STARTPTS[audio{index}]")
     filters.append("[column0][column1][column2]hstack=inputs=3[output]")
-    filters.append(
-        "[audio0][audio1][audio2]amix=inputs=3:duration=longest:"
-        f"dropout_transition=0:normalize=1,atrim=duration={duration},"
-        f"{normalization_filter(config.normalization, peak)},apad[audio]"
-    )
+    if config.audio_codec != "none":
+        filters.append(
+            "[audio0][audio1][audio2]amix=inputs=3:duration=longest:"
+            f"dropout_transition=0:normalize=1,atrim=duration={duration},"
+            f"{normalization_filter(config.normalization, peak)},apad[audio]"
+        )
     Path(graph_path).write_text(";\n".join(filters), encoding="utf-8")
     return (
         args
@@ -277,11 +269,10 @@ def composition_arguments(columns, duration, output, graph_path, config, peak=No
             str(graph_path),
             "-map",
             "[output]",
-            "-map",
-            "[audio]",
             "-t",
             str(duration),
         ]
+        + (["-map", "[audio]"] if config.audio_codec != "none" else [])
         + config.encoding_arguments()
         + [str(output)]
     )

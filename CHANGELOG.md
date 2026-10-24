@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-23
+
+### Added
+
+- Added Clear All Sources below Remove Selected Clips to empty the source list, timelines, preview, and saved source state.
+- Added No Audio to Audio Settings, omitting audio streams from clip intermediates, A/B/C timelines, and the final assembly while skipping normalization and audio measurement.
+
+### Fixed
+
+- Cleared stale progress, ETA, and status messages when clearing all sources.
+
 ## [0.3.1] - 2026-10-23
 
 ### Changed

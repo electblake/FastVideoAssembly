@@ -67,6 +67,10 @@ in each timeline, normalized to AAC stereo at 48 kHz and 192 kb/s. Clips without
 audio contribute silence for their duration. The final video mixes A/B/C with
 equal weights using FFmpeg's normalized audio mix; no custom mixing controls yet.
 
+Select **No Audio** in Audio Settings to omit audio tracks from clip intermediates,
+A/B/C timelines, and the final assembly. Audio measurement, normalization, and mixing
+are skipped in this mode.
+
 The dockable **Audio Settings** panel sits below Render Settings. Its
 **Normalize Audio → Normalization mode** selector saves one of:
 

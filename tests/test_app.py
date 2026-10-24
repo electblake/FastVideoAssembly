@@ -894,3 +894,78 @@ def test_interrupted_restore_retains_complete_saved_queue(controller, preview_so
     assert restored.settings.value('sources/paths', type=list) == [str(second), str(preview_source)]
     assert restored.assembler.tracks == [[], [], []]
     restored.loading = False
+
+
+@pytest.mark.parametrize('normalization', ['None', 'True Peak', 'YouTube'])
+@pytest.mark.parametrize('combine', [False, True])
+def test_no_audio_omits_streams_and_measurements(controller, preview_source, tmp_path, qtbot, monkeypatch, normalization, combine):
+    import json
+
+    controller.normalization.setCurrentText(normalization)
+    controller.combine.setChecked(combine)
+    controller.audio_codec.setCurrentIndex(controller.audio_codec.findData('none'))
+    assert not controller.normalization.isEnabled()
+    assert controller.settings.value('audio/codec') == 'none'
+    config = RenderConfig(column_width=60, height=120, encoder='libx264', speed='fast', normalization=normalization, audio_codec='none')
+    monkeypatch.setattr(controller, 'render_config', lambda: config)
+    controller.assembler.tracks = [[Clip(preview_source, 3, 60, 120, True)] for _ in range(3)]
+    controller.start_export(tmp_path / 'silent.mp4')
+    assert controller.measurement_keys == {}
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert controller.process.exitCode() == 0
+    assert (tmp_path / 'silent_FINAL.mp4').exists() == combine
+    for suffix in ['A', 'B', 'C'] + (['FINAL'] if combine else []):
+        result = subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(tmp_path / f'silent_{suffix}.mp4')], capture_output=True, text=True, check=True)
+        streams = json.loads(result.stdout)['streams']
+        assert [stream['codec_type'] for stream in streams] == ['video']
+    controller.audio_codec.setCurrentIndex(controller.audio_codec.findData('aac'))
+    assert controller.normalization.isEnabled()
+    assert controller.normalization.currentText() == normalization
+
+
+def test_clear_all_sources_button(controller, preview_source, qtbot):
+    assert not controller.clear_sources_button.isEnabled()
+    controller.add_paths([preview_source])
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    controller.assembler.create_button.click()
+    controller.library.setCurrentRow(0)
+    layout = controller.library_dock.widget().layout()
+    assert layout.indexOf(controller.clear_sources_button) == layout.indexOf(controller.remove_sources_button) + 1
+    controller.running = True
+    controller.update_enabled()
+    assert not controller.clear_sources_button.isEnabled()
+    controller.running = False
+    controller.update_enabled()
+    controller.progress.setFormat("A · %p% · ETA 00:01:00")
+    controller.progress.setValue(800)
+    controller.window.statusBar().showMessage("Old render")
+    controller.clear_sources_button.click()
+    assert controller.library.count() == 0
+    assert controller.clips == []
+    assert controller.assembler.tracks == [[], [], []]
+    assert controller.preview.player.source().isEmpty()
+    assert controller.settings.value('sources/paths', type=list) == []
+    assert not controller.clear_sources_button.isEnabled()
+    assert controller.progress.value() == 0
+    assert controller.progress.text() == "0%"
+    assert controller.window.statusBar().currentMessage() == "Ready"
+    assert preview_source.exists()
+
+
+def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtbot):
+    controller.normalization.setCurrentText('True Peak')
+    controller.audio_codec.setCurrentText('No Audio')
+    controller.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.audio_codec.currentText() == 'No Audio'
+    assert restored.normalization.currentText() == 'True Peak'
+    assert not restored.normalization.isEnabled()
+    restored.running = True
+    restored.update_enabled()
+    restored.running = False
+    restored.update_enabled()
+    assert not restored.normalization.isEnabled()
+    restored.audio_codec.setCurrentText('AAC')
+    assert restored.normalization.isEnabled()
+    assert restored.normalization.currentText() == 'True Peak'
