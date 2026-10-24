@@ -1,6 +1,6 @@
 """Video metadata, balanced ordering, and the column FFmpeg composition."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from math import ceil
 from pathlib import Path
@@ -110,6 +110,13 @@ class RenderConfig:
     scaler: str = "cpu"
     scaling_algorithm: str = "bicubic"
     qsv_scaling_mode: str = "hq"
+    audio_gains: dict = field(default_factory=dict)
+
+    def source_audio_filter(self, clip, peaks):
+        if str(clip.path) in self.audio_gains:
+            return normalization_filter(self.normalization, gain=self.audio_gains[str(clip.path)])
+        peak = peaks[clip.path] if self.normalization == "True Peak" else None
+        return normalization_filter(self.normalization, peak)
 
     @property
     def pixel_format(self):
@@ -243,8 +250,7 @@ def column_arguments(track, output, graph_path, config, peaks=None):
         inputs.append(f"[v{index}]")
         if config.audio_codec != "none":
             if clip.has_audio:
-                peak = peaks[clip.path] if config.normalization == "True Peak" else None
-                normalize = normalization_filter(config.normalization, peak)
+                normalize = config.source_audio_filter(clip, peaks)
                 filters.append(
                     f"[{index}:a:0]aresample=48000:async=1:first_pts=0,"
                     "aformat=sample_fmts=fltp:channel_layouts=stereo,"
@@ -337,7 +343,7 @@ def division_arguments(tracks, duration, output, graph_path, config, peaks, peak
                 inputs.append(f"[v{index}]")
             if audio:
                 if clip.has_audio:
-                    source_peak = peaks[clip.path] if config.normalization == "True Peak" else None
+                    normalize = config.source_audio_filter(clip, peaks)
                     if measure or audio_only:
                         manifest = Path(graph_path).with_name(f"{Path(graph_path).stem}-{index}.ffconcat")
                         manifest.write_text(
@@ -356,7 +362,7 @@ def division_arguments(tracks, duration, output, graph_path, config, peaks, peak
                     filters.append(
                         source + "aresample=48000:async=1:first_pts=0,"
                         "aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                        f"atrim=duration={clip.duration},{normalization_filter(config.normalization, source_peak)},"
+                        f"atrim=duration={clip.duration},{normalize},"
                         f"apad=whole_dur={length},atrim=duration={length},asetpts=PTS-STARTPTS[a{index}]"
                     )
                 else:

@@ -2,10 +2,23 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-24
+
 ### Added
 
 - Added Sticky clip selections and Sticky timeline selections checkboxes below their button grids, enabled by default, with settings restored across app restarts.
 - Added single-selection behavior when sticky selections are disabled, reducing existing selections to one and replacing it when another item is clicked.
+- Added synchronized audio gain controls with Apply and Reset below the video preview, saved per clip for preview playback and export.
+- Displayed saved source True Peak measurements and estimated levels after the applied gain; identified dynamic YouTube normalization separately.
+
+### Fixed
+
+- Included manual clip gains in final-mix cache identities, preserving unrelated measurements and reusing unchanged mixes across restarts.
+- Skipped source normalization measurements during export when a manual gain replaces automatic normalization.
+- Matched processed preview audio to export resampling, stereo conversion, and applied gain, including boosts above 0 dB.
+- Canceled obsolete preview processing on clip changes and window close, and released temporary preview media after deselection.
+- Preserved unapplied gain edits during selection refreshes and discarded them when changing clips.
+- Kept the preview audio readout on one line to prevent selection changes from resizing the dock and shifting timeline drag coordinates.
 
 ## [0.7.5] - 2026-10-24
 

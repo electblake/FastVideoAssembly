@@ -3,7 +3,9 @@
 import math
 
 
-def normalization_filter(mode, peak=None):
+def normalization_filter(mode, peak=None, gain=None):
+    if gain is not None:
+        return f"volume={gain}dB:precision=double,aresample=48000"
     if mode == "None":
         return "anull"
     if mode == "True Peak":

@@ -1,6 +1,7 @@
 """Native Qt shell following FastVideoCropper's widget and appearance patterns."""
 
 import json
+import math
 import random
 import sys
 import tempfile
@@ -70,7 +71,7 @@ from .assembly import (
     timeline_name,
     video_paths,
 )
-from .audio import mix_peak_arguments, peak_measurement_arguments
+from .audio import mix_peak_arguments, normalization_filter, peak_measurement_arguments
 from .hardware import render_hardware
 from .preview import Preview
 from .settings import NoProfileSettings
@@ -146,6 +147,7 @@ class Application(QObject):
         self.normalizing_audio = False
         self.measurement_processes = {}
         self.normalization_cache = json.loads(self.settings.value("audio/measurements", "{}"))
+        self.audio_gains = json.loads(self.settings.value("audio/gains", "{}"))
         self.replace_outputs = set()
         self.runtime_timer = QTimer(self.window)
         self.runtime_timer.setInterval(1000)
@@ -285,6 +287,7 @@ class Application(QObject):
         )
         view_menu.addAction(self.library_dock.toggleViewAction())
         self.preview = Preview()
+        self.preview.gain_applied.connect(self.apply_clip_gain)
         self.preview_dock = QDockWidget("Preview", self.window)
         self.preview_dock.setObjectName("clipPreview")
         self.preview_dock.setWidget(self.preview)
@@ -386,6 +389,7 @@ class Application(QObject):
         saved = RenderConfig(**{
             key: self.settings.value(f"render/{key}", value, type=type(value))
             for key, value in asdict(RenderConfig()).items()
+            if key != "audio_gains"
         })
         self.resolution.setCurrentIndex(
             self.resolution.findData([saved.column_width * self.settings.value("assembly/columns", 3, type=int), saved.height])
@@ -610,6 +614,7 @@ class Application(QObject):
         self.settings.setValue("audio/analysis_workers", self.analysis_workers.value())
         self.settings.setValue("audio/normalization", mode)
         self.settings.setValue("audio/codec", self.audio_codec.currentData())
+        self.update_preview_audio()
 
     def render_config(self):
         width, height = self.resolution.currentData()
@@ -627,6 +632,7 @@ class Application(QObject):
             self.scaler.currentData(),
             self.scaling_algorithm.currentData(),
             self.qsv_scaling_mode.currentData(),
+            dict(self.audio_gains),
         )
 
     def apply_filter_threads(self):
@@ -637,7 +643,8 @@ class Application(QObject):
         self.scaling_algorithm.setEnabled(self.scaler.currentData() in ("cpu", "cuda"))
         self.qsv_scaling_mode.setEnabled(self.scaler.currentData() == "qsv")
         for key, value in asdict(self.render_config()).items():
-            self.settings.setValue(f"render/{key}", value)
+            if key != "audio_gains":
+                self.settings.setValue(f"render/{key}", value)
         self.settings.setValue("render/combine", self.combine.isChecked())
         self.refresh()
 
@@ -724,6 +731,7 @@ class Application(QObject):
             self.settings.setValue("paths", [str(clip.path) for clip in track])
         self.settings.endArray()
         self.settings.setValue("audio/measurements", json.dumps(self.normalization_cache))
+        self.settings.setValue("audio/gains", json.dumps(self.audio_gains))
         self.settings.sync()
 
     def create_timelines(self):
@@ -1055,7 +1063,45 @@ class Application(QObject):
         for source, bar in self.assembler.segment_bars:
             TimelineClipStyle.apply(bar, source in selected)
         self.preview.set_clip(clip)
+        self.update_preview_audio()
         self.update_enabled()
+
+    def update_preview_audio(self):
+        clip = self.selected_clip
+        enabled = isinstance(clip, Clip) and clip.has_audio
+        gain = 0.0
+        level = "No audio" if isinstance(clip, Clip) else ""
+        source_level = ""
+        audio_filter = "anull"
+        if enabled:
+            mode = self.normalization.currentText()
+            level = "True peak: Not measured"
+            peak = None
+            if self.normalization_cache:
+                key = json.dumps(["source-v1", self.source_audio_key(clip)])
+                if key in self.normalization_cache:
+                    peak = float(self.normalization_cache[key])
+                    source_level = f"Source true peak: {peak:.2f} dBTP"
+            manual = str(clip.path) in self.audio_gains
+            if manual:
+                gain = self.audio_gains[str(clip.path)]
+                audio_filter = normalization_filter(mode, gain=gain)
+            elif mode == "True Peak" and peak is not None:
+                gain = 0.0 if peak == -math.inf else -1.0 - peak
+                audio_filter = normalization_filter(mode, peak)
+            elif mode == "YouTube":
+                level = "Normalization: YouTube (dynamic)"
+                audio_filter = normalization_filter(mode)
+            if peak is not None and (mode != "YouTube" or manual):
+                level = f"Estimated true peak: {peak + gain:.2f} dBTP"
+        self.preview.audio_level.setToolTip(source_level)
+        self.preview.set_audio(gain, level, audio_filter,
+                               enabled and not self.running and not self.loading, self.ffmpeg)
+
+    def apply_clip_gain(self, gain):
+        self.audio_gains[str(self.selected_clip.path)] = gain
+        self.save_active_state()
+        self.update_preview_audio()
 
     def remove_selected_clip(self):
         paths = {
@@ -1142,6 +1188,9 @@ class Application(QObject):
         self.assembler.remove_timelines.setEnabled(idle and self.combine.isChecked()
                                                   and self.assembler.render_timelines.isChecked())
         self.audio_panel.setEnabled(idle)
+        self.preview.audio_controls.setEnabled(
+            idle and isinstance(self.selected_clip, Clip) and self.selected_clip.has_audio
+        )
         self.normalize_button.setEnabled(
             idle and self.audio_codec.currentData() != "none"
             and self.normalization.currentText() == "True Peak"
@@ -1292,6 +1341,7 @@ class Application(QObject):
                         config.audio_codec != "none"
                         and config.normalization == "True Peak"
                         and clip.has_audio
+                        and str(clip.path) not in config.audio_gains
                         and clip.path not in scheduled_measurements
                     ):
                         cache_key = json.dumps(["source-v1", self.source_audio_key(clip)])
@@ -1320,8 +1370,9 @@ class Application(QObject):
                 graph_path = graph_root / f"composition{division_start // columns_per_division}.ffgraph"
                 if config.audio_codec != "none" and config.normalization == "True Peak":
                     cache_key = json.dumps([
-                        "mix-v1", render_timelines, config.audio_codec, config.fps,
-                        [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config)]
+                        "mix-v2", render_timelines, config.audio_codec, config.fps,
+                        [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config),
+                          config.audio_gains.get(str(clip.path))]
                           for clip in track] for track in group_tracks],
                     ])
                     if cache_key in self.normalization_cache:
@@ -1473,6 +1524,7 @@ class Application(QObject):
             self.audio_peaks[self.measurement_keys[index]] = float(measured["input_tp"])
             self.normalization_cache[self.measurement_cache_keys[index]] = measured["input_tp"]
             self.save_active_state()
+            self.update_preview_audio()
             self.measurement_seconds[index] = self.export_jobs[index][1]
             self.stage_seconds = sum(self.measurement_seconds.values())
             self.log.appendPlainText(
@@ -1644,6 +1696,7 @@ class Application(QObject):
                 event.ignore()
                 return True
             self.preview.player.stop()
+            self.preview.set_clip(None)
             self.settings.setValue("mainWindow/geometry", self.window.saveGeometry())
             self.settings.setValue("mainWindow/state", self.window.saveState(1))
             self.save_active_state()

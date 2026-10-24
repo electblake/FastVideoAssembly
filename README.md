@@ -155,6 +155,18 @@ measures only scanned audio sources without a matching saved True Peak measureme
 Reused measurements appear in Activity. Mix measurements are reused only while
 their source files, timeline contents, and relevant audio settings still match.
 YouTube mode retains dynamic loudness processing during each render.
+
+The **Preview** dock shows the estimated peak after the applied gain, with the saved
+source True Peak measurement in its tooltip. **Audio gain** has a synchronized slider and dB
+spinbox. **Apply** saves the selected clip's manual gain in place of its automatic
+normalization, using it for preview playback and export. **Reset** discards
+unapplied edits. Selecting another clip also discards unapplied edits. Applied
+gains survive app restarts. Preview playback waits for processed audio when a
+gain or dynamic normalization is applied. The final assembly still uses the
+selected final-mix normalization; changing a clip gain invalidates only matching
+mix measurements. Source measurements remain unchanged. YouTube normalization is
+dynamic and is not represented as a fixed gain until manually overridden.
+
 **Audio analysis workers** sets the maximum concurrent True Peak measurements
 before each column render (default 2). Measurements run in bounded batches;
 pause takes effect after the active batch, and stop terminates active workers.
