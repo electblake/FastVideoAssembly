@@ -15,13 +15,13 @@ from platformdirs import user_config_path
 from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, Qt, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
     QDockWidget,
     QFileDialog,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -34,8 +34,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
-    QSplitter,
     QStyle,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -44,7 +44,6 @@ from PySide6.QtWidgets import (
 from . import APP_NAME, APP_VERSION, integrations
 from .assembly import (
     RenderConfig,
-    balance,
     clip_duration,
     clip_from_probe,
     column_jobs,
@@ -53,8 +52,7 @@ from .assembly import (
 )
 from .audio import mix_peak_arguments, peak_measurement_arguments
 from .preview import Preview
-
-COLUMN_NAMES = ("Left", "Center", "Right")
+from .three_column import COLUMN_NAMES, ThreeColumnAssembly
 
 
 def timestamp(seconds):
@@ -79,11 +77,9 @@ class Application(QObject):
             QSettings.Format.IniFormat,
         )
         self.clips = []
-        self.tracks = [[], [], []]
         self.pending = []
         self.loading = False
         self.running = False
-        self.active_column = 0
         self.selected_clip = None
         self.progress_buffer = ""
         self.output = None
@@ -106,7 +102,9 @@ class Application(QObject):
         if self.settings.contains("mainWindow/state"):
             self.window.restoreState(self.settings.value("mainWindow/state"), 1)
         if self.settings.contains("mainWindow/splitterState"):
-            self.splitter.restoreState(self.settings.value("mainWindow/splitterState"))
+            self.assembler.splitter.restoreState(
+                self.settings.value("mainWindow/splitterState")
+            )
         self.refresh()
         if paths:
             self.add_paths(paths)
@@ -156,13 +154,15 @@ class Application(QObject):
         self.open_button = QPushButton("Open folder…")
         self.open_button.clicked.connect(self.open_folder)
         library_layout.addWidget(self.open_button)
-        self.library_summary = QLabel("Choose a folder of videos.")
-        self.library_summary.setWordWrap(True)
-        library_layout.addWidget(self.library_summary)
         self.library = QListWidget()
         self.library.setAccessibleName("Source videos")
+        self.library.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.library.currentRowChanged.connect(self.select_source)
+        self.library.itemSelectionChanged.connect(self.select_source)
         library_layout.addWidget(self.library)
+        self.remove_sources_button = QPushButton("Remove Selected Clips")
+        self.remove_sources_button.clicked.connect(self.remove_selected_clip)
+        library_layout.addWidget(self.remove_sources_button)
         self.library_dock = QDockWidget("Source videos", self.window)
         self.library_dock.setObjectName("sourceVideos")
         self.library_dock.setWidget(library_widget)
@@ -185,106 +185,21 @@ class Application(QObject):
         self.build_audio_settings(view_menu)
         self.build_output_settings(view_menu)
 
-        central = QWidget()
-        layout = QVBoxLayout(central)
-        output_strip = QHBoxLayout()
-        self.column_headers = []
-        for index, name in enumerate(COLUMN_NAMES):
-            label = QLabel(f"{index + 1} · {name}\n⅓ of output · 640 × 1080")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setMargin(12)
-            output_strip.addWidget(label, 1)
-            self.column_headers.append(label)
-        layout.addLayout(output_strip)
-        self.splitter = QSplitter(Qt.Orientation.Vertical)
-        self.timeline = pg.PlotWidget()
-        self.timeline.setAccessibleName(
-            "Three tracks with a shared time axis in seconds"
-        )
-        self.timeline.setMinimumHeight(180)
-        self.timeline.setLabel("bottom", "Time", units="s")
-        self.timeline.getAxis("left").setTicks(
-            [[(2 - index, f"{name} · ⅓") for index, name in enumerate(COLUMN_NAMES)]]
-        )
-        self.timeline.setMouseEnabled(x=True, y=False)
-        self.timeline.setMenuEnabled(False)
-        self.timeline.hideButtons()
-        self.timeline.scene().sigMouseClicked.connect(self.timeline_clicked)
-        self.splitter.addWidget(self.timeline)
-        editor = QWidget()
-        editors = QHBoxLayout(editor)
-        self.lists = []
-        self.track_labels = []
-        for column, name in enumerate(COLUMN_NAMES):
-            panel = QVBoxLayout()
-            label = QLabel(name)
-            self.track_labels.append(label)
-            panel.addWidget(label)
-            listing = QListWidget()
-            listing.setAccessibleName(f"{name} column clip order")
-            listing.currentRowChanged.connect(
-                lambda row, column=column: self.select_column(column, row)
-            )
-            listing.itemDoubleClicked.connect(self.open_source)
-            self.lists.append(listing)
-            panel.addWidget(listing)
-            editors.addLayout(panel, 1)
-        self.splitter.addWidget(editor)
-        self.splitter.setSizes([240, 300])
-        layout.addWidget(self.splitter, 1)
-        edit_buttons = QGridLayout()
-        self.balance_button = QPushButton("Shortest First")
-        self.balance_button.clicked.connect(self.rebalance)
-        edit_buttons.addWidget(self.balance_button, 0, 0)
-        self.longest_button = QPushButton("Longest First")
-        self.longest_button.setToolTip(
-            "Balance total column durations, then sort each column from longest to shortest."
-        )
-        self.longest_button.clicked.connect(lambda: self.rebalance(longest_first=True))
-        edit_buttons.addWidget(self.longest_button, 0, 1)
-        self.up_button = QPushButton("Move earlier")
-        self.up_button.clicked.connect(lambda: self.reorder(-1))
-        self.down_button = QPushButton("Move later")
-        self.down_button.clicked.connect(lambda: self.reorder(1))
-        self.left_button = QPushButton("Move to left column")
-        self.left_button.clicked.connect(lambda: self.move_column(-1))
-        self.right_button = QPushButton("Move to right column")
-        self.right_button.clicked.connect(lambda: self.move_column(1))
-        self.remove_button = QPushButton("Remove Selected Clip")
-        self.remove_button.clicked.connect(self.remove_selected_clip)
-        edit_buttons.addWidget(self.remove_button, 0, 2, 1, 2)
-        for index, button in enumerate(
-            (
-                self.up_button,
-                self.down_button,
-                self.left_button,
-                self.right_button,
-            )
-        ):
-            edit_buttons.addWidget(button, 1, index)
-        layout.addLayout(edit_buttons)
-        self.summary = QLabel()
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
-        export_row = QHBoxLayout()
-        self.export_button = QPushButton("Render three-column video…")
-        self.export_button.setProperty("variant", "primary")
-        self.export_button.setProperty("buttonSize", "large")
-        self.export_button.clicked.connect(self.choose_export)
-        export_row.addWidget(self.export_button, 1)
-        self.stop_button = QPushButton("Stop rendering")
-        self.stop_button.clicked.connect(self.stop_export)
-        export_row.addWidget(self.stop_button)
-        layout.addLayout(export_row)
+        self.assembler_tabs = QTabWidget()
+        self.assembler = ThreeColumnAssembly(self)
+        self.assembler_tabs.addTab(self.assembler, "3 Column Assembly")
+        self.window.setCentralWidget(self.assembler_tabs)
+        process_panel = QWidget()
+        process_layout = QVBoxLayout(process_panel)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
-        layout.addWidget(self.progress)
-        self.window.setCentralWidget(central)
+        process_layout.addWidget(self.progress)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
         self.log_dock = QDockWidget("Process log", self.window)
         self.log_dock.setObjectName("processLog")
-        self.log_dock.setWidget(self.log)
+        process_layout.addWidget(self.log, 1)
+        self.log_dock.setWidget(process_panel)
         self.window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.hide()
         view_menu.addAction(self.log_dock.toggleViewAction())
@@ -527,6 +442,7 @@ class Application(QObject):
             self.rebalance()
             return
         self.probing_path = self.pending.pop(0)
+        self.log_dock.show()
         self.progress.setRange(0, 0)
         self.window.statusBar().showMessage(f"Reading {self.probing_path.name}")
         self.probe.start(
@@ -556,21 +472,25 @@ class Application(QObject):
     def clear(self):
         self.selected_clip = None
         self.clips.clear()
-        self.tracks = [[], [], []]
+        self.assembler.tracks = [[], [], []]
         self.refresh()
 
     def rebalance(self, longest_first=False):
-        self.tracks = balance(self.clips, longest_first=longest_first)
+        self.assembler.rebalance(self.clips, longest_first=longest_first)
         self.refresh()
         self.window.statusBar().showMessage("Ready")
 
     def refresh(self):
+        selected_paths = {
+            item.data(Qt.ItemDataRole.UserRole).path
+            for item in self.library.selectedItems()
+        }
         config = self.render_config()
-        for index, label in enumerate(self.column_headers):
+        for index, label in enumerate(self.assembler.column_headers):
             label.setText(
                 f"{index + 1} · {COLUMN_NAMES[index]}\n⅓ of output · {config.column_width} × {config.height}"
             )
-        self.export_button.setText(
+        self.assembler.export_button.setText(
             "Render columns + final video"
             if self.combine.isChecked()
             else "Render three column videos"
@@ -578,33 +498,28 @@ class Application(QObject):
         self.library.blockSignals(True)
         self.library.clear()
         for clip in self.clips:
-            eligibility = "Portrait" if clip.portrait else "Excluded: not portrait"
-            item = QListWidgetItem(
-                f"{clip.path.name}\n{timestamp(clip.duration)} · {eligibility}"
-            )
+            item = QListWidgetItem(clip.path.name)
             item.setToolTip(str(clip.path))
             item.setData(Qt.ItemDataRole.UserRole, clip)
             self.library.addItem(item)
         self.library.blockSignals(False)
-        eligible = sum(clip.portrait for clip in self.clips)
-        self.library_summary.setText(
-            f"{len(self.clips)} videos · {eligible} portrait · "
-            f"{len(self.clips) - eligible} excluded"
-        )
         durations = [
-            sum(clip_duration(clip, config) for clip in track) for track in self.tracks
+            sum(clip_duration(clip, config) for clip in track)
+            for track in self.assembler.tracks
         ]
-        self.timeline.clear()
-        self.segment_bars = []
+        self.assembler.timeline.clear()
+        self.assembler.segment_bars = []
         palette = QApplication.palette()
-        self.timeline.setBackground(palette.base().color())
-        self.timeline.setLabel(
+        self.assembler.timeline.setBackground(palette.base().color())
+        self.assembler.timeline.setLabel(
             "bottom", "Time", units="s", color=palette.text().color().name()
         )
         for axis in ("left", "bottom"):
-            self.timeline.getAxis(axis).setTextPen(palette.text().color())
-            self.timeline.getAxis(axis).setPen(palette.text().color())
-        for column, (track, listing) in enumerate(zip(self.tracks, self.lists)):
+            self.assembler.timeline.getAxis(axis).setTextPen(palette.text().color())
+            self.assembler.timeline.getAxis(axis).setPen(palette.text().color())
+        for column, (track, listing) in enumerate(
+            zip(self.assembler.tracks, self.assembler.lists)
+        ):
             listing.blockSignals(True)
             listing.clear()
             start = 0
@@ -629,8 +544,8 @@ class Application(QObject):
                     pen=palette.text().color(),
                 )
                 bar.setToolTip(f"{clip.path.name} · {timestamp(duration)}")
-                self.timeline.addItem(bar)
-                self.segment_bars.append((clip, bar))
+                self.assembler.timeline.addItem(bar)
+                self.assembler.segment_bars.append((clip, bar))
                 label = pg.TextItem(
                     str(number + 1),
                     color=palette.text().color(),
@@ -638,28 +553,40 @@ class Application(QObject):
                     anchor=(0.5, 0.5),
                 )
                 label.setPos(start + duration / 2, 2 - column)
-                self.timeline.addItem(label)
+                self.assembler.timeline.addItem(label)
                 start += duration
             listing.blockSignals(False)
-            self.track_labels[column].setText(
+            self.assembler.track_labels[column].setText(
                 f"{COLUMN_NAMES[column]} · {len(track)} clips · {timestamp(durations[column])}"
             )
-        self.timeline.setYRange(-0.6, 2.6, padding=0)
-        self.timeline.setXRange(0, max(1, max(durations)), padding=0.02)
-        self.summary.setText(f"Output Length: {timestamp(max(durations))}")
+        self.assembler.timeline.setYRange(-0.6, 2.6, padding=0)
+        self.assembler.timeline.setXRange(0, max(1, max(durations)), padding=0.02)
+        self.assembler.summary.setText(f"Output Length: {timestamp(max(durations))}")
         self.select_clip(self.selected_clip)
+        self.library.blockSignals(True)
+        for row in range(self.library.count()):
+            item = self.library.item(row)
+            item.setSelected(item.data(Qt.ItemDataRole.UserRole).path in selected_paths)
+        self.library.blockSignals(False)
+        self.update_enabled()
 
-    def select_source(self, row):
-        if row >= 0:
-            self.select_clip(self.library.item(row).data(Qt.ItemDataRole.UserRole))
+    def select_source(self, row=None):
+        items = self.library.selectedItems()
+        current = self.library.currentItem()
+        item = current if current in items else next(iter(items), None)
+        self.select_clip(
+            item.data(Qt.ItemDataRole.UserRole) if item is not None else None,
+            sync_source=False,
+        )
 
     def select_column(self, column, row):
         if row >= 0:
-            self.select_clip(self.tracks[column][row])
+            self.select_clip(self.assembler.tracks[column][row])
 
-    def select_clip(self, clip):
+    def select_clip(self, clip, sync_source=True):
         self.selected_clip = clip
-        for listing in [self.library, *self.lists]:
+        listings = [self.library, *self.assembler.lists] if sync_source else self.assembler.lists
+        for listing in listings:
             listing.blockSignals(True)
             row = next(
                 (
@@ -673,10 +600,10 @@ class Application(QObject):
             if row >= 0:
                 listing.scrollToItem(listing.item(row))
             listing.blockSignals(False)
-        for column, listing in enumerate(self.lists):
+        for column, listing in enumerate(self.assembler.lists):
             if listing.currentRow() >= 0:
-                self.active_column = column
-        for source, bar in self.segment_bars:
+                self.assembler.active_column = column
+        for source, bar in self.assembler.segment_bars:
             bar.setOpts(
                 pen=pg.mkPen(
                     QApplication.palette().text().color(),
@@ -687,43 +614,49 @@ class Application(QObject):
         self.update_enabled()
 
     def remove_selected_clip(self):
-        path = self.selected_clip.path
-        self.clips = [clip for clip in self.clips if clip.path != path]
-        self.tracks = [
-            [clip for clip in track if clip.path != path] for track in self.tracks
+        paths = {
+            item.data(Qt.ItemDataRole.UserRole).path
+            for item in self.library.selectedItems()
+        }
+        self.clips = [clip for clip in self.clips if clip.path not in paths]
+        self.assembler.tracks = [
+            [clip for clip in track if clip.path not in paths]
+            for track in self.assembler.tracks
         ]
         self.selected_clip = None
         self.refresh()
 
     def reorder(self, offset):
-        column = self.active_column
-        row = self.lists[column].currentRow()
-        track = self.tracks[column]
+        column = self.assembler.active_column
+        row = self.assembler.lists[column].currentRow()
+        track = self.assembler.tracks[column]
         track[row], track[row + offset] = track[row + offset], track[row]
         self.refresh()
-        self.lists[column].setCurrentRow(row + offset)
+        self.assembler.lists[column].setCurrentRow(row + offset)
 
     def move_column(self, offset):
-        column = self.active_column
-        row = self.lists[column].currentRow()
-        clip = self.tracks[column].pop(row)
+        column = self.assembler.active_column
+        row = self.assembler.lists[column].currentRow()
+        clip = self.assembler.tracks[column].pop(row)
         target = column + offset
-        self.tracks[target].append(clip)
+        self.assembler.tracks[target].append(clip)
         self.refresh()
-        self.lists[target].setCurrentRow(len(self.tracks[target]) - 1)
+        self.assembler.lists[target].setCurrentRow(
+            len(self.assembler.tracks[target]) - 1
+        )
 
     def timeline_clicked(self, event):
         if self.running or self.loading:
             return
-        point = self.timeline.getViewBox().mapSceneToView(event.scenePos())
+        point = self.assembler.timeline.getViewBox().mapSceneToView(event.scenePos())
         column = 2 - round(point.y())
         if column in range(3) and abs(point.y() - (2 - column)) <= 0.325:
             config = self.render_config()
             start = 0
-            for row, clip in enumerate(self.tracks[column]):
+            for row, clip in enumerate(self.assembler.tracks[column]):
                 duration = clip_duration(clip, config)
                 if start <= point.x() < start + duration:
-                    self.lists[column].setCurrentRow(row)
+                    self.select_clip(clip)
                     break
                 start += duration
 
@@ -736,24 +669,32 @@ class Application(QObject):
         idle = not self.loading and not self.running
         for widget in (self.open_button, self.open_action, self.clear_action):
             widget.setEnabled(idle)
-        self.balance_button.setEnabled(idle and bool(self.clips))
-        self.longest_button.setEnabled(idle and bool(self.clips))
-        self.export_button.setEnabled(idle and all(self.tracks))
-        self.stop_button.setEnabled(self.running)
+        self.assembler.balance_button.setEnabled(idle and bool(self.clips))
+        self.assembler.longest_button.setEnabled(idle and bool(self.clips))
+        self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks))
+        self.assembler.stop_button.setEnabled(self.running)
         self.render_panel.setEnabled(idle)
         self.audio_panel.setEnabled(idle)
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
-        self.remove_button.setEnabled(idle and self.selected_clip is not None)
-        for listing in self.lists:
+        removable = idle and bool(self.library.selectedItems())
+        self.assembler.remove_button.setEnabled(removable)
+        self.assembler.remove_button.setText(
+            "Remove Selected Clips" if len(self.library.selectedItems()) > 1
+            else "Remove Selected Clip"
+        )
+        self.remove_sources_button.setEnabled(removable)
+        for listing in self.assembler.lists:
             listing.setEnabled(idle)
-        column = self.active_column
-        row = self.lists[column].currentRow()
-        selected = idle and row >= 0
-        self.up_button.setEnabled(selected and row > 0)
-        self.down_button.setEnabled(selected and row < len(self.tracks[column]) - 1)
-        self.left_button.setEnabled(selected and column > 0)
-        self.right_button.setEnabled(selected and column < 2)
+        column = self.assembler.active_column
+        row = self.assembler.lists[column].currentRow()
+        selected = idle and row >= 0 and len(self.library.selectedItems()) == 1
+        self.assembler.up_button.setEnabled(selected and row > 0)
+        self.assembler.down_button.setEnabled(
+            selected and row < len(self.assembler.tracks[column]) - 1
+        )
+        self.assembler.left_button.setEnabled(selected and column > 0)
+        self.assembler.right_button.setEnabled(selected and column < 2)
 
     def choose_export(self):
         if not self.output_folder.text().strip():
@@ -789,11 +730,12 @@ class Application(QObject):
         self.measurement_keys = {}
         self.audio_peaks = {}
         durations = [
-            sum(clip_duration(clip, config) for clip in track) for track in self.tracks
+            sum(clip_duration(clip, config) for clip in track)
+            for track in self.assembler.tracks
         ]
         scheduled_measurements = set()
         self.column_cleanup = {}
-        for index, (track, path) in enumerate(zip(self.tracks, columns)):
+        for index, (track, path) in enumerate(zip(self.assembler.tracks, columns)):
             manifest = graph_root / f"column{index}.ffconcat"
             jobs = list(column_jobs(track, path, manifest, config, self.audio_peaks))
             temporary_paths = [manifest]
@@ -873,7 +815,7 @@ class Application(QObject):
             if line.startswith("out_time_us=") and line[12:] != "N/A":
                 seconds = int(line[12:]) / 1_000_000
                 self.progress.setValue(
-                    round(max(0, min(1, seconds / self.stage_duration)) * 1000)
+                    min(999, round(max(0, seconds / self.stage_duration) * 1000))
                 )
 
     def read_log(self):
@@ -918,8 +860,13 @@ class Application(QObject):
         self.running = False
         self.export_directory.cleanup()
         self.export_directory = None
+        result = (
+            "Rendering stopped"
+            if self.stop_requested
+            else f"FFmpeg exited with code {exit_code}"
+        )
         self.window.statusBar().showMessage(
-            f"FFmpeg exited with code {exit_code} · {self.export_jobs[self.export_index][0]}"
+            f"{result} · {self.export_jobs[self.export_index][0]}"
         )
         self.update_enabled()
 
@@ -948,7 +895,7 @@ class Application(QObject):
             self.settings.setValue("mainWindow/geometry", self.window.saveGeometry())
             self.settings.setValue("mainWindow/state", self.window.saveState(1))
             self.settings.setValue(
-                "mainWindow/splitterState", self.splitter.saveState()
+                "mainWindow/splitterState", self.assembler.splitter.saveState()
             )
             self.settings.sync()
         return super().eventFilter(watched, event)

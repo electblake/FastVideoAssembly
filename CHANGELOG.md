@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added a source-list remove button and Shift/Ctrl multi-selection for removing sources and their timeline segments together.
 - Added a dockable video preview with paused first frame, playback controls, and scrubbing.
 - Linked clip selection across the source library, central lists, timeline, and preview.
 - Added Remove Selected Clip without deleting source files or rearranging remaining clips.
@@ -11,6 +12,8 @@
 
 ### Changed
 
+- Moved the three-column editor into a dedicated `3 Column Assembly` tab, with portrait filtering local to that assembler.
+- Moved shared progress above the process log and removed assembler-specific source-library text.
 - Completed each column end to end before starting the next, measuring audio immediately before each clip render and deleting temporary files after saving the column.
 - Generated `_A`, `_B`, `_C`, and `_FINAL` filenames automatically, without save dialogs.
 - Reset progress for each processing step; displayed busy progress during metadata scans.
@@ -18,6 +21,10 @@
 
 ### Fixed
 
+- Replaced source multi-selection with the clicked clip even when its timeline segment or column row was already current, preventing unintended batch removal.
+- Cleared stale preview and clip controls after source deselection, and disabled single-clip movement for multiple selected sources.
+- Updated the central remove button label to reflect batch removal.
+- Kept rendering progress below 100% until FFmpeg exits successfully, and identified user cancellation as stopped.
 - Aligned timeline blocks, clip boundaries, click selection, and Output Length with frame-rounded render durations.
 - Prevented clicks in gaps between timeline rows from selecting nearby clips.
 - Preserved completed columns when a later step failed or was stopped.

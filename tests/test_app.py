@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PySide6.QtCore import QPointF, QUrl
+from PySide6.QtCore import QPointF, Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from fastvideoassembly import app
@@ -109,7 +109,34 @@ def test_progress_resets_and_tracks_only_the_current_step(
     assert controller.progress.value() == 500
     process.readAllStandardOutput.return_value = b"out_time_us=100000000\n"
     controller.read_progress()
-    assert controller.progress.value() == 1000
+    assert controller.progress.value() == 999
+
+
+@pytest.mark.parametrize("stopped,exit_code", [(False, 0), (True, 0), (False, 1)])
+def test_progress_completes_only_after_successful_exit(
+    controller, tmp_path, monkeypatch, stopped, exit_code
+):
+    process = Mock()
+    process.readAllStandardOutput.return_value = b"out_time_us=100000000\n"
+    process.readAllStandardError.return_value = b""
+    monkeypatch.setattr(controller, "process", process)
+    controller.export_jobs = [(tmp_path / "final.mp4", 100, [])]
+    controller.export_index = 0
+    controller.measurement_keys = {}
+    controller.column_cleanup = {}
+    controller.export_directory = Mock()
+    cleanup = controller.export_directory.cleanup
+    controller.running = True
+    controller.stop_requested = stopped
+    controller.start_export_job()
+    controller.finished(exit_code, None)
+    assert controller.progress.value() == (1000 if not stopped and exit_code == 0 else 999)
+    assert not controller.running
+    cleanup.assert_called_once()
+    assert controller.export_directory is None
+    if stopped:
+        assert controller.window.statusBar().currentMessage().startswith("Rendering stopped")
+    process.start.assert_called_once()
 
 
 def test_output_browse_and_all_four_suffixes(controller, tmp_path, monkeypatch):
@@ -120,7 +147,7 @@ def test_output_browse_and_all_four_suffixes(controller, tmp_path, monkeypatch):
     assert controller.output_folder.text() == str(tmp_path)
     controller.project_name.setText("Project")
     controller.filename_format.setText("{project}.Assembly.2026-10-23.mp4")
-    controller.tracks = [
+    controller.assembler.tracks = [
         [Clip(tmp_path / f"clip{i}.mp4", 1, 60, 120)] for i in range(3)
     ]
     controller.combine.setChecked(True)
@@ -141,7 +168,9 @@ def test_output_browse_and_all_four_suffixes(controller, tmp_path, monkeypatch):
 def test_failed_clip_stops_queue_and_removes_temporary_files(
     controller, tmp_path, qtbot
 ):
-    controller.tracks = [[Clip(tmp_path / "missing.mp4", 1, 90, 160)] for _ in range(3)]
+    controller.assembler.tracks = [
+        [Clip(tmp_path / "missing.mp4", 1, 90, 160)] for _ in range(3)
+    ]
     output = tmp_path / "failed.mp4"
     controller.start_export(output)
     temporary = Path(controller.export_directory.name)
@@ -159,7 +188,11 @@ def test_true_peak_measures_each_clip_immediately_before_rendering(
     controller.normalization.setCurrentText("True Peak")
     controller.combine.setChecked(False)
     clips = [Clip(tmp_path / f"source{i}.mp4", 1, 90, 160, True) for i in range(4)]
-    controller.tracks = [[clips[0], clips[1]], [clips[2]], [clips[3], clips[0]]]
+    controller.assembler.tracks = [
+        [clips[0], clips[1]],
+        [clips[2]],
+        [clips[3], clips[0]],
+    ]
     monkeypatch.setattr(controller, "start_export_job", Mock())
     controller.start_export(tmp_path / "ordered.mp4")
     events = []
@@ -220,7 +253,7 @@ def test_column_a_is_saved_and_cleaned_before_b_failure(
     )
     monkeypatch.setattr(controller, "render_config", lambda: config)
     clip = Clip(source, 3, 60, 120, True)
-    controller.tracks = [
+    controller.assembler.tracks = [
         [clip],
         [Clip(tmp_path / "missing.mp4", 3, 60, 120, True)],
         [clip],
@@ -292,41 +325,81 @@ def test_shared_selection_and_removal(controller, preview_source, tmp_path, orig
         path.hardlink_to(preview_source)
         clips.append(Clip(path, 3, 60, 120, True))
     controller.clips = clips
-    controller.tracks = [[clips[1]], [clips[0], clips[2]], [clips[3]]]
+    controller.assembler.tracks = [[clips[1]], [clips[0], clips[2]], [clips[3]]]
     controller.refresh()
     if origin == "source":
         controller.library.setCurrentRow(0)
     elif origin == "column":
-        controller.lists[1].setCurrentRow(0)
+        controller.assembler.lists[1].setCurrentRow(0)
     else:
         event = Mock()
-        event.scenePos.return_value = controller.timeline.getViewBox().mapViewToScene(
-            QPointF(1, 1)
+        event.scenePos.return_value = (
+            controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(1, 1))
         )
         controller.timeline_clicked(event)
     assert controller.selected_clip == clips[0]
     assert controller.library.currentRow() == 0
-    assert [listing.currentRow() for listing in controller.lists] == [-1, 0, -1]
-    assert controller.active_column == 1
+    assert [listing.currentRow() for listing in controller.assembler.lists] == [
+        -1,
+        0,
+        -1,
+    ]
+    assert controller.assembler.active_column == 1
     assert controller.preview.player.source() == QUrl.fromLocalFile(str(preview_source))
-    assert controller.down_button.isEnabled()
-    assert controller.remove_button.isEnabled()
+    assert controller.assembler.down_button.isEnabled()
+    assert controller.assembler.remove_button.isEnabled()
     controller.refresh()
     assert controller.selected_clip == clips[0]
-    assert controller.lists[1].currentRow() == 0
-    controller.remove_button.click()
+    assert controller.assembler.lists[1].currentRow() == 0
+    controller.assembler.remove_button.click()
     assert controller.clips == clips[1:]
-    assert controller.tracks == [[clips[1]], [clips[2]], [clips[3]]]
+    assert controller.assembler.tracks == [[clips[1]], [clips[2]], [clips[3]]]
     assert preview_source.exists()
     assert controller.selected_clip is None
     assert controller.preview.player.source().isEmpty()
-    assert not controller.remove_button.isEnabled()
+    assert not controller.assembler.remove_button.isEnabled()
+
+
+@pytest.mark.parametrize("button", ["source", "central"])
+def test_shift_select_and_remove_sources(controller, preview_source, tmp_path, qtbot, button):
+    clips = []
+    for index in range(5):
+        path = tmp_path / f"clip{index}.mp4"
+        path.hardlink_to(preview_source)
+        clips.append(Clip(path, 3, 60, 120, True))
+    controller.clips = clips[:]
+    controller.assembler.tracks = [[clips[0], clips[3]], [clips[1]], [clips[2], clips[4]]]
+    controller.refresh()
+    listing = controller.library
+    qtbot.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton,
+                     pos=listing.visualItemRect(listing.item(1)).center())
+    qtbot.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.ShiftModifier,
+                     pos=listing.visualItemRect(listing.item(3)).center())
+    assert [listing.row(item) for item in listing.selectedItems()] == [1, 2, 3]
+    assert controller.selected_clip == clips[3]
+    assert controller.preview.player.source() == QUrl.fromLocalFile(str(clips[3].path))
+    controller.refresh()
+    assert [listing.row(item) for item in listing.selectedItems()] == [1, 2, 3]
+    controller.running = True
+    controller.update_enabled()
+    assert not controller.remove_sources_button.isEnabled()
+    controller.running = False
+    controller.update_enabled()
+    remove = (controller.remove_sources_button if button == "source"
+              else controller.assembler.remove_button)
+    remove.click()
+    assert controller.clips == [clips[0], clips[4]]
+    assert controller.assembler.tracks == [[clips[0]], [], [clips[4]]]
+    assert all(clip.path.exists() for clip in clips)
+    assert not controller.remove_sources_button.isEnabled()
+    assert controller.preview.player.source().isEmpty()
 
 
 def test_preview_play_pause_scrub_and_stop(controller, preview_source, qtbot):
     clip = Clip(preview_source, 3, 60, 120, True)
     controller.clips = [clip]
-    controller.tracks = [[clip], [], []]
+    controller.assembler.tracks = [[clip], [], []]
     controller.refresh()
     controller.library.setCurrentRow(0)
     player = controller.preview.player
@@ -361,10 +434,10 @@ def test_excluded_source_can_be_selected_and_removed(controller, preview_source)
     controller.refresh()
     controller.library.setCurrentRow(0)
     assert controller.selected_clip == clip
-    assert controller.remove_button.isEnabled()
-    assert not controller.up_button.isEnabled()
-    assert not controller.right_button.isEnabled()
-    controller.remove_button.click()
+    assert controller.assembler.remove_button.isEnabled()
+    assert not controller.assembler.up_button.isEnabled()
+    assert not controller.assembler.right_button.isEnabled()
+    controller.assembler.remove_button.click()
     assert controller.clips == []
     assert preview_source.exists()
 
@@ -384,54 +457,102 @@ def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tm
     first = Clip(tmp_path / "first.mp4", 0.101, 60, 120)
     second = Clip(tmp_path / "second.mp4", 0.101, 60, 120)
     controller.clips = [first, second]
-    controller.tracks = [[first, second], [], []]
+    controller.assembler.tracks = [[first, second], [], []]
     controller.refresh()
-    assert controller.summary.text() == "Output Length: 00:00.3"
-    assert controller.segment_bars[0][1].opts["width"] == pytest.approx(4 / 30)
-    assert controller.segment_bars[1][1].opts["x0"] == pytest.approx(4 / 30)
+    assert controller.assembler.summary.text() == "Output Length: 00:00.3"
+    assert controller.assembler.segment_bars[0][1].opts["width"] == pytest.approx(
+        4 / 30
+    )
+    assert controller.assembler.segment_bars[1][1].opts["x0"] == pytest.approx(4 / 30)
     event = Mock()
-    event.scenePos.return_value = controller.timeline.getViewBox().mapViewToScene(
-        QPointF(0.12, 2)
+    event.scenePos.return_value = (
+        controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(0.12, 2))
     )
     controller.timeline_clicked(event)
     assert controller.selected_clip == first
-    event.scenePos.return_value = controller.timeline.getViewBox().mapViewToScene(
-        QPointF(0.15, 1.6)
+    event.scenePos.return_value = (
+        controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(0.15, 1.6))
     )
     controller.timeline_clicked(event)
     assert controller.selected_clip == first
-    event.scenePos.return_value = controller.timeline.getViewBox().mapViewToScene(
-        QPointF(0.15, 2)
+    event.scenePos.return_value = (
+        controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(0.15, 2))
     )
     controller.timeline_clicked(event)
     assert controller.selected_clip == second
 
 
 def test_empty_and_editable_tracks(controller):
-    assert not controller.export_button.isEnabled()
+    assert not controller.assembler.export_button.isEnabled()
     controller.clips = [Clip(Path(f"clip{n}.mp4"), n, 90, 160) for n in range(1, 7)]
     controller.rebalance()
-    assert controller.export_button.isEnabled()
-    controller.lists[0].setCurrentRow(0)
-    original = list(controller.tracks[0])
-    controller.down_button.click()
-    assert controller.tracks[0] == original[::-1]
-    selected = controller.tracks[0][1]
-    controller.right_button.click()
-    assert controller.tracks[1][-1] == selected
-    assert sum(map(len, controller.tracks)) == 6
+    assert controller.assembler.export_button.isEnabled()
+    controller.assembler.lists[0].setCurrentRow(0)
+    original = list(controller.assembler.tracks[0])
+    controller.assembler.down_button.click()
+    assert controller.assembler.tracks[0] == original[::-1]
+    selected = controller.assembler.tracks[0][1]
+    controller.assembler.right_button.click()
+    assert controller.assembler.tracks[1][-1] == selected
+    assert sum(map(len, controller.assembler.tracks)) == 6
     controller.clear()
-    assert not controller.export_button.isEnabled()
+    assert not controller.assembler.export_button.isEnabled()
     assert controller.library.count() == 0
+
+
+def test_assembler_tab_and_shared_process_dock(controller):
+    assert controller.window.centralWidget() is controller.assembler_tabs
+    assert controller.assembler_tabs.count() == 1
+    assert controller.assembler_tabs.tabText(0) == "3 Column Assembly"
+    assert controller.assembler_tabs.widget(0) is controller.assembler
+    for widget in (
+        controller.assembler.timeline,
+        controller.assembler.lists[0],
+        controller.assembler.export_button,
+        controller.assembler.stop_button,
+        controller.assembler.remove_button,
+    ):
+        assert controller.assembler.isAncestorOf(widget)
+    assert not controller.assembler.isAncestorOf(controller.progress)
+    process_layout = controller.log_dock.widget().layout()
+    assert process_layout.itemAt(0).widget() is controller.progress
+    assert process_layout.itemAt(1).widget() is controller.log
+    for dock in (
+        controller.library_dock,
+        controller.preview_dock,
+        controller.config_dock,
+        controller.audio_dock,
+        controller.output_dock,
+    ):
+        assert not controller.assembler.isAncestorOf(dock)
+
+
+def test_shared_sources_are_neutral_and_tab_filters_portrait(controller, tmp_path):
+    clips = [
+        Clip(tmp_path / "portrait.mp4", 3, 60, 120),
+        Clip(tmp_path / "landscape.mp4", 4, 120, 60),
+        Clip(tmp_path / "square.mp4", 5, 120, 120),
+    ]
+    controller.clips = clips
+    for longest in (False, True):
+        controller.rebalance(longest_first=longest)
+        assert controller.clips == clips
+        assert [controller.library.item(i).text() for i in range(3)] == [
+            c.path.name for c in clips
+        ]
+        assert [c for track in controller.assembler.tracks for c in track] == clips[:1]
+    controller.library.setCurrentRow(1)
+    assert controller.selected_clip == clips[1]
+    assert controller.assembler.remove_button.isEnabled()
 
 
 def test_appearance_preserves_assembly_and_uses_separate_settings(controller):
     controller.clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 4)]
     controller.rebalance()
-    tracks = [list(track) for track in controller.tracks]
+    tracks = [list(track) for track in controller.assembler.tracks]
     controller.theme.setCurrentIndex(controller.theme.findData("nord"))
     controller.apply_appearance()
-    assert controller.tracks == tracks
+    assert controller.assembler.tracks == tracks
     assert controller.settings.value("appearance/theme") == "nord"
     assert "FastVideoAssembly" in controller.window.windowTitle()
 
@@ -441,30 +562,30 @@ def test_busy_locks_edits(controller):
     controller.update_enabled()
     assert not controller.open_action.isEnabled()
     assert not controller.clear_action.isEnabled()
-    assert not controller.export_button.isEnabled()
-    assert not controller.longest_button.isEnabled()
-    assert controller.stop_button.isEnabled()
+    assert not controller.assembler.export_button.isEnabled()
+    assert not controller.assembler.longest_button.isEnabled()
+    assert controller.assembler.stop_button.isEnabled()
     controller.running = False
 
 
 def test_order_buttons_keep_equal_track_totals(controller):
-    assert controller.balance_button.text() == "Shortest First"
-    assert controller.longest_button.text() == "Longest First"
-    assert not controller.longest_button.isEnabled()
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
+    assert not controller.assembler.longest_button.isEnabled()
     controller.clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 19)]
     controller.rebalance()
-    original = [list(track) for track in controller.tracks]
-    controller.longest_button.click()
-    assert controller.tracks != original
+    original = [list(track) for track in controller.assembler.tracks]
+    controller.assembler.longest_button.click()
+    assert controller.assembler.tracks != original
     assert all(
         [c.duration for c in track] == sorted((c.duration for c in track), reverse=True)
-        for track in controller.tracks
+        for track in controller.assembler.tracks
     )
-    assert [sum(c.duration for c in track) for track in controller.tracks] == [
-        sum(c.duration for c in track) for track in original
-    ]
-    controller.balance_button.click()
-    assert controller.tracks == original
+    assert [
+        sum(c.duration for c in track) for track in controller.assembler.tracks
+    ] == [sum(c.duration for c in track) for track in original]
+    controller.assembler.balance_button.click()
+    assert controller.assembler.tracks == original
 
 
 def test_shared_configuration_persists_and_updates_dimensions(controller, qtbot):
@@ -474,8 +595,8 @@ def test_shared_configuration_persists_and_updates_dimensions(controller, qtbot)
     controller.quality.setValue(18)
     controller.combine.setChecked(False)
     assert controller.render_config().column_width == 1280
-    assert "1280 × 2160" in controller.column_headers[0].text()
-    assert "final" not in controller.export_button.text()
+    assert "1280 × 2160" in controller.assembler.column_headers[0].text()
+    assert "final" not in controller.assembler.export_button.text()
     restored = app.Application()
     qtbot.addWidget(restored.window)
     assert restored.render_config() == controller.render_config()
@@ -506,3 +627,55 @@ def test_audio_dock_modes_persistence_and_busy_state(controller, qtbot):
     controller.update_enabled()
     assert not controller.audio_panel.isEnabled()
     controller.running = False
+
+@pytest.mark.parametrize("origin", ["timeline", "column"])
+def test_click_current_clip_replaces_source_multi_selection(controller, tmp_path, qtbot, monkeypatch, origin):
+    monkeypatch.setattr(controller.preview, "set_clip", Mock())
+    clips = [Clip(tmp_path / f"{i}.mp4", 3, 60, 120) for i in range(3)]
+    controller.clips = clips[:]
+    controller.assembler.tracks = [[clips[0]], [clips[1]], [clips[2]]]
+    controller.refresh()
+    library = controller.library
+    library.setCurrentRow(0)
+    library.item(1).setSelected(True)
+    assert len(library.selectedItems()) == 2
+    assert not controller.assembler.right_button.isEnabled()
+    assert controller.assembler.remove_button.text() == "Remove Selected Clips"
+    if origin == "timeline":
+        event = Mock()
+        event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(1, 2))
+        controller.timeline_clicked(event)
+    else:
+        listing = controller.assembler.lists[0]
+        qtbot.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton,
+                         pos=listing.visualItemRect(listing.item(0)).center())
+    assert [library.row(item) for item in library.selectedItems()] == [0]
+    assert controller.assembler.right_button.isEnabled()
+    controller.assembler.remove_button.click()
+    assert controller.clips == clips[1:]
+
+
+def test_ctrl_deselect_updates_preview_and_disables_empty_selection(controller, tmp_path, qtbot, monkeypatch):
+    preview = Mock()
+    monkeypatch.setattr(controller.preview, "set_clip", preview)
+    clips = [Clip(tmp_path / f"{i}.mp4", 3, 60, 120) for i in range(3)]
+    controller.clips = clips[:]
+    controller.assembler.tracks = [[clips[0]], [clips[1]], [clips[2]]]
+    controller.refresh()
+    listing = controller.library
+    listing.setCurrentRow(0)
+    for row in [2, 2, 0]:
+        qtbot.mouseClick(listing.viewport(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.ControlModifier,
+                         pos=listing.visualItemRect(listing.item(row)).center())
+        selected = listing.selectedItems()
+        if selected:
+            assert controller.selected_clip in [item.data(Qt.ItemDataRole.UserRole) for item in selected]
+    assert not listing.selectedItems()
+    assert controller.selected_clip is None
+    preview.assert_called_with(None)
+    assert not controller.remove_sources_button.isEnabled()
+    assert not controller.assembler.remove_button.isEnabled()
+    assert not controller.assembler.right_button.isEnabled()
+    controller.refresh()
+    assert not listing.selectedItems()

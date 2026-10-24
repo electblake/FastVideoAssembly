@@ -18,11 +18,16 @@ Open a folder with Ctrl+O, drop files/folders onto the window, or pass paths to
 AVI and WebM files, without recursion or duplicates. Importing adds to the
 library and rebuilds the balanced arrangement. Clear assembly starts over.
 
-Only display aspect ratios below 1 enter the tracks; square and landscape clips
-remain visible in the source library as excluded. Rotation metadata and sample
-aspect ratio are considered. Longest clips are allocated to the currently
+The shared source library lists filenames without assembler-specific labels or
+filtering. The **3 Column Assembly** central tab accepts display aspect ratios
+below 1; square and landscape clips remain available in the shared source library.
+Rotation metadata and sample aspect ratio are considered. Longest clips are allocated to the currently
 shortest column, then each column is sorted shortest to longest. This is a
 duration-balancing heuristic, not a promise of an optimal equal partition.
+
+All three-column editing and render controls live in that tab. Preview, render,
+audio, and output settings remain shared docks. Progress appears directly above
+the log inside the shared Process log dock, which opens when processing starts.
 
 The central timeline uses a shared seconds axis and duration-scaled blocks,
 including the same output-frame rounding used by rendering.

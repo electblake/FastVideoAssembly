@@ -204,7 +204,7 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch):
     qtbot.addWidget(controller.window)
     controller.normalization.setCurrentText(mode)
     monkeypatch.setattr(controller, "render_config", lambda: config)
-    controller.tracks = [[clip], [clip], [clip]]
+    controller.assembler.tracks = [[clip], [clip], [clip]]
     gui_output = tmp_path / "queued.mp4"
     controller.start_export(gui_output)
     gui_output = controller.output

@@ -66,7 +66,7 @@ def balance(clips, longest_first=False):
     tracks = [[], [], []]
     durations = [0.0, 0.0, 0.0]
     for clip in sorted(
-        (clip for clip in clips if clip.portrait),
+        clips,
         key=lambda clip: (-clip.duration, str(clip.path)),
     ):
         index = min(range(3), key=lambda index: durations[index])

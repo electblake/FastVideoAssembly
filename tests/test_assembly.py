@@ -20,7 +20,6 @@ from fastvideoassembly.assembly import (
 
 def test_balanced_tracks_keep_every_portrait_once_and_ascending():
     clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 10)]
-    clips += [Clip(Path("wide.mp4"), 10, 160, 90), Clip(Path("square.mp4"), 2, 90, 90)]
     tracks = balance(clips)
     assert sorted(clip.duration for track in tracks for clip in track) == list(
         range(1, 10)
@@ -29,6 +28,14 @@ def test_balanced_tracks_keep_every_portrait_once_and_ascending():
     assert all(
         track == sorted(track, key=lambda clip: clip.duration) for track in tracks
     )
+
+
+def test_duration_allocator_does_not_filter_source_shapes():
+    clips = [
+        Clip(Path(f"clip{i}.mp4"), i + 1, width, height)
+        for i, (width, height) in enumerate([(60, 120), (120, 60), (120, 120)])
+    ]
+    assert {clip for track in balance(clips) for clip in track} == set(clips)
 
 
 def test_longest_first_preserves_track_membership_and_totals():
@@ -373,11 +380,11 @@ def test_gui_import_and_full_resolution_export(
     controller.add_paths([clip.path for clip in media])
     qtbot.waitUntil(lambda: not controller.loading, timeout=30000)
     assert len(controller.clips) == 4
-    assert controller.export_button.isEnabled()
+    assert controller.assembler.export_button.isEnabled()
     output = tmp_path / "gui-output.mp4"
     controller.start_export(output)
     output = controller.output
-    assert not controller.balance_button.isEnabled()
+    assert not controller.assembler.balance_button.isEnabled()
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0
     assert output.exists() == combine
@@ -467,7 +474,7 @@ def test_stop_removes_intermediates_and_does_not_start_next_clip(
     )
     controller = app.Application()
     qtbot.addWidget(controller.window)
-    controller.tracks = [[media[0]] * 200 for _ in range(3)]
+    controller.assembler.tracks = [[media[0]] * 200 for _ in range(3)]
     monkeypatch.setattr(
         controller,
         "render_config",
