@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Moved Create Final 3 Column Assembly Cut above the render buttons; disabling it exports only A/B/C timelines.
+- Removed the redundant Output Length label below the timeline controls.
+- Labeled columns A, B, and C and replaced middle-dot separators throughout the application with dashes.
+
+### Fixed
+
+- Preserved timeline zoom and source-list state when toggling final assembly, avoiding an unnecessary rebuild of the editor.
+
 ## [0.3.2] - 2026-10-23
 
 ### Added

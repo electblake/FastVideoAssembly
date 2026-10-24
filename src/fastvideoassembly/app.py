@@ -242,15 +242,15 @@ class Application(QObject):
         ]:
             self.frame_rate.addItem(label, value)
         self.encoder = QComboBox()
-        self.encoder.addItem("NVIDIA HEVC · 10-bit", "hevc_nvenc")
-        self.encoder.addItem("NVIDIA H.264 · 8-bit", "h264_nvenc")
-        self.encoder.addItem("CPU H.264 · 8-bit", "libx264")
+        self.encoder.addItem("NVIDIA HEVC - 10-bit", "hevc_nvenc")
+        self.encoder.addItem("NVIDIA H.264 - 8-bit", "h264_nvenc")
+        self.encoder.addItem("CPU H.264 - 8-bit", "libx264")
         self.speed = QComboBox()
         for value in ("fast", "balanced", "quality"):
             self.speed.addItem(value.title(), value)
         self.quality = QSpinBox()
         self.quality.setRange(1, 51)
-        self.combine = QCheckBox("Also render the final three-column video")
+        self.combine = QCheckBox("Create Final 3 Column Assembly Cut")
         saved = RenderConfig()
         if self.settings.contains("render/config"):
             saved = RenderConfig(**json.loads(self.settings.value("render/config")))
@@ -271,7 +271,6 @@ class Application(QObject):
         ]:
             form.addRow(title, widget)
             widget.setAccessibleName(title)
-        form.addRow(self.combine)
         self.config_dock = QDockWidget("Render Settings", self.window)
         self.config_dock.setObjectName("sharedRenderConfiguration")
         self.config_dock.setWidget(self.render_panel)
@@ -282,7 +281,9 @@ class Application(QObject):
         for combo in (self.resolution, self.frame_rate, self.encoder, self.speed):
             combo.currentIndexChanged.connect(self.render_settings_changed)
         self.quality.valueChanged.connect(self.render_settings_changed)
-        self.combine.toggled.connect(self.render_settings_changed)
+        self.combine.toggled.connect(
+            lambda checked: self.settings.setValue("render/combine", checked)
+        )
 
     def build_audio_settings(self, view_menu):
         self.audio_panel = QWidget()
@@ -477,7 +478,7 @@ class Application(QObject):
         self.probing_path = self.pending.pop(0)
         self.log_dock.show()
         self.window.statusBar().showMessage(
-            f"Scanning {self.progress.value()} / {self.progress.maximum()} complete · {self.probing_path.name}"
+            f"Scanning {self.progress.value()} / {self.progress.maximum()} complete - {self.probing_path.name}"
         )
         self.probe.start(
             self.ffprobe,
@@ -527,7 +528,7 @@ class Application(QObject):
         config = self.render_config()
         for index, label in enumerate(self.assembler.column_headers):
             label.setText(
-                f"{index + 1} · {COLUMN_NAMES[index]}\n⅓ of output · {config.column_width} × {config.height}"
+                f"{"ABC"[index]} - {COLUMN_NAMES[index]}\n⅓ of output - {config.column_width} × {config.height}"
             )
         self.library.blockSignals(True)
         self.library.clear()
@@ -562,7 +563,7 @@ class Application(QObject):
                 item = QListWidgetItem(
                     f"{number + 1}. {clip.path.name}\n"
                     f"{timestamp(start)} → {timestamp(start + duration)} "
-                    f"· {timestamp(duration)}"
+                    f"- {timestamp(duration)}"
                 )
                 item.setData(Qt.ItemDataRole.UserRole, clip)
                 item.setToolTip(str(clip.path))
@@ -577,7 +578,7 @@ class Application(QObject):
                     brush=brush,
                     pen=palette.text().color(),
                 )
-                bar.setToolTip(f"{clip.path.name} · {timestamp(duration)}")
+                bar.setToolTip(f"{clip.path.name} - {timestamp(duration)}")
                 self.assembler.timeline.addItem(bar)
                 self.assembler.segment_bars.append((clip, bar))
                 label = pg.TextItem(
@@ -591,11 +592,10 @@ class Application(QObject):
                 start += duration
             listing.blockSignals(False)
             self.assembler.track_labels[column].setText(
-                f"{COLUMN_NAMES[column]} · {len(track)} clips · {timestamp(durations[column])}"
+                f"{COLUMN_NAMES[column]} - {len(track)} clips - {timestamp(durations[column])}"
             )
         self.assembler.timeline.setYRange(-0.6, 2.6, padding=0)
         self.assembler.timeline.setXRange(0, max(1, max(durations)), padding=0.02)
-        self.assembler.summary.setText(f"Output Length: {timestamp(max(durations))}")
         self.select_clip(self.selected_clip)
         self.library.blockSignals(True)
         for row in range(self.library.count()):
@@ -711,6 +711,7 @@ class Application(QObject):
         self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks))
         self.assembler.stop_button.setEnabled(self.running)
         self.render_panel.setEnabled(idle)
+        self.combine.setEnabled(idle)
         self.audio_panel.setEnabled(idle)
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
@@ -850,7 +851,7 @@ class Application(QObject):
                 args = args()
         self.stage_log = ""
         operation = "Measuring audio" if measuring else "Rendering"
-        self.stage_description = f"{operation} · {path.name}"
+        self.stage_description = f"{operation} - {path.name}"
         self.update_export_progress()
         self.log.appendPlainText(f"{operation} {path}\n")
         self.process.start(self.ffmpeg, args)
@@ -876,9 +877,9 @@ class Application(QObject):
         fraction = completed / total
         self.progress.setValue(min(999, int(fraction * 1000)) if fraction < 1 else 1000)
         eta = timestamp((monotonic() - self.group_started) * (total - completed) / completed) if completed else "--:--:--"
-        self.progress.setFormat(f"{self.group_name} · %p% · ETA {eta}")
+        self.progress.setFormat(f"{self.group_name} - %p% - ETA {eta}")
         self.window.statusBar().showMessage(
-            f"{self.group_name} · {self.progress.value() // 10}% · ETA {eta} · {self.stage_description}"
+            f"{self.group_name} - {self.progress.value() // 10}% - ETA {eta} - {self.stage_description}"
         )
 
     def read_log(self):
@@ -930,7 +931,7 @@ class Application(QObject):
             else f"FFmpeg exited with code {exit_code}"
         )
         self.window.statusBar().showMessage(
-            f"{result} · {self.export_jobs[self.export_index][0]}"
+            f"{result} - {self.export_jobs[self.export_index][0]}"
         )
         self.update_enabled()
 

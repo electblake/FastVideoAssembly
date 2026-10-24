@@ -470,7 +470,6 @@ def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tm
     controller.clips = [first, second]
     controller.assembler.tracks = [[first, second], [], []]
     controller.refresh()
-    assert controller.assembler.summary.text() == "Output Length: 00:00:00"
     assert controller.assembler.segment_bars[0][1].opts["width"] == pytest.approx(
         4 / 30
     )
@@ -936,7 +935,7 @@ def test_clear_all_sources_button(controller, preview_source, qtbot):
     assert not controller.clear_sources_button.isEnabled()
     controller.running = False
     controller.update_enabled()
-    controller.progress.setFormat("A · %p% · ETA 00:01:00")
+    controller.progress.setFormat("A - %p% - ETA 00:01:00")
     controller.progress.setValue(800)
     controller.window.statusBar().showMessage("Old render")
     controller.clear_sources_button.click()
@@ -969,3 +968,48 @@ def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtb
     restored.audio_codec.setCurrentText('AAC')
     assert restored.normalization.isEnabled()
     assert restored.normalization.currentText() == 'True Peak'
+
+
+def test_final_checkbox_placement_and_busy_lock(controller):
+    assert controller.combine.text() == 'Create Final 3 Column Assembly Cut'
+    layout = controller.assembler.layout()
+    assert layout.itemAt(layout.count() - 2).widget() is controller.combine
+    assert controller.assembler.isAncestorOf(controller.combine)
+    assert not controller.render_panel.isAncestorOf(controller.combine)
+    controller.combine.setChecked(False)
+    assert controller.settings.value('render/combine', type=bool) is False
+    controller.running = True
+    controller.update_enabled()
+    assert not controller.combine.isEnabled()
+    controller.running = False
+    controller.update_enabled()
+    assert controller.combine.isEnabled()
+
+
+def test_final_checkbox_preserves_editor_and_restores_setting(controller, tmp_path, qtbot, monkeypatch):
+    monkeypatch.setattr(controller.preview, 'set_clip', Mock())
+    clips = [Clip(tmp_path / f'{i}.mp4', 10, 60, 120) for i in range(6)]
+    controller.clips = clips
+    controller.rebalance()
+    controller.library.setCurrentRow(0)
+    controller.library.item(1).setSelected(True)
+    view = controller.assembler.timeline.getViewBox()
+    view.setXRange(2, 5, padding=0)
+    before = view.viewRange()[0][:]
+    item = controller.library.item(0)
+    for checked in [False, True, False]:
+        controller.combine.setChecked(checked)
+        assert view.viewRange()[0] == before
+        assert controller.library.item(0) is item
+        assert len(controller.library.selectedItems()) == 2
+    controller.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert not restored.combine.isChecked()
+    assert restored.assembler.isAncestorOf(restored.combine)
+    for label, letter in zip(restored.assembler.column_headers, 'ABC'):
+        assert label.text().startswith(f'{letter} - ')
+    restored.loading = True
+    restored.update_enabled()
+    assert not restored.combine.isEnabled()
+    restored.loading = False

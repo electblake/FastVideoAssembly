@@ -104,7 +104,7 @@ For example, project `Holiday` on 2026-10-23 produces
 `Holiday.Assembly.2026-10-23_A.mp4`, `_B.mp4`, and `_C.mp4` sequentially,
 then `Holiday.Assembly.2026-10-23_FINAL.mp4` when combining is enabled. These playable
 column cuts retain their natural durations and stay beside the final output.
-Uncheck **Also render the final three-column video** to produce only these files.
+Uncheck **Create Final 3 Column Assembly Cut**, above the render buttons, to produce only these files.
 When checked, a final pass stacks the columns, inheriting the render settings
 without resizing. Shorter columns hold their last frame. This final stage is
 another encode, not stream copy. There is no automatic reuse of prior outputs.

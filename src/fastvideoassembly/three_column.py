@@ -27,7 +27,7 @@ class ThreeColumnAssembly(QWidget):
         output_strip = QHBoxLayout()
         self.column_headers = []
         for index, name in enumerate(COLUMN_NAMES):
-            label = QLabel(f"{index + 1} · {name}\n⅓ of output · 640 × 1080")
+            label = QLabel(f"{"ABC"[index]} - {name}\n⅓ of output - 640 × 1080")
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setMargin(12)
             output_strip.addWidget(label, 1)
@@ -41,7 +41,7 @@ class ThreeColumnAssembly(QWidget):
         self.timeline.setMinimumHeight(180)
         self.timeline.setLabel("bottom", "Time", units="s")
         self.timeline.getAxis("left").setTicks(
-            [[(2 - index, f"{name} · ⅓") for index, name in enumerate(COLUMN_NAMES)]]
+            [[(2 - index, f"{name} - ⅓") for index, name in enumerate(COLUMN_NAMES)]]
         )
         self.timeline.setMouseEnabled(x=True, y=False)
         self.timeline.setMenuEnabled(False)
@@ -105,9 +105,7 @@ class ThreeColumnAssembly(QWidget):
         ):
             edit_buttons.addWidget(button, 1, index)
         layout.addLayout(edit_buttons)
-        self.summary = QLabel()
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        layout.addWidget(controller.combine)
         export_row = QHBoxLayout()
         self.create_button = QPushButton("Create Timelines")
         self.create_button.setProperty("buttonSize", "large")
