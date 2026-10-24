@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-24
+
 ### Added
 
+- Added Help > Check for Updates with GitHub release checks, installer download progress, cancellation, and Quit and install update.
+- Delayed installer startup until the application process exits using an inherited Windows process handle.
 - Added `-NoProfile` to both launchers and `Application(no_profile=True)` for isolated sessions that start with defaults and never read or modify the saved user profile.
 
 ## [0.4.0] - 2026-10-24

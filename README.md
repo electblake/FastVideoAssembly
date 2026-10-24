@@ -6,6 +6,12 @@ Explorer registration, and Windows installer from FastVideoCropper.
 
 ## Run
 
+Help > Check for Updates checks the latest stable GitHub release. Download saves
+the Windows installer in the application cache and shows progress. Quit and
+install update closes the app and starts Setup only after its process exits.
+Cancel closes the dialog without installing. Update checks are disabled while
+scanning or rendering.
+
 Install Python 3.12+, uv, and FFmpeg/FFprobe 8+ on PATH, then:
 
 ```powershell

@@ -70,6 +70,7 @@ from .preview import Preview
 from .styles.timeline import TimelineClipStyle, TimelineTrackStyle
 from .three_column import ThreeColumnAssembly, TimelineSegment
 from .timeline import CLIP_HEIGHT, CLIP_Y_OFFSET, TRACK_HEIGHT, clip_spans, move_clips
+from .updates import UpdateDialog
 
 
 def timestamp(seconds):
@@ -214,6 +215,7 @@ class Application(QObject):
         appearance_action.setDefaultWidget(appearance_widget)
         appearance.addAction(appearance_action)
         help_menu = self.window.menuBar().addMenu("&Help")
+        self.update_action = help_menu.addAction("Check for Updates...", self.check_updates)
         help_menu.addAction("Install in File Explorer", self.install_explorer)
 
         library_widget = QWidget()
@@ -1034,6 +1036,7 @@ class Application(QObject):
 
     def update_enabled(self):
         idle = not self.loading and not self.running
+        self.update_action.setEnabled(idle)
         for widget in (self.open_button, self.open_action, self.clear_action):
             widget.setEnabled(idle)
         scanned = bool(self.clips) and all(isinstance(clip, Clip) for clip in self.clips)
@@ -1392,6 +1395,11 @@ class Application(QObject):
             f"{result} - {self.export_jobs[self.export_index][0]}"
         )
         self.update_enabled()
+
+    def check_updates(self):
+        dialog = UpdateDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
 
     def install_explorer(self):
         integrations.install(self.launcher_module)
