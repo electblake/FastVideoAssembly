@@ -1,6 +1,7 @@
 """Native Qt shell following FastVideoCropper's widget and appearance patterns."""
 
 import json
+import random
 import sys
 import tempfile
 from dataclasses import asdict
@@ -13,7 +14,16 @@ from time import monotonic
 import pyqtgraph as pg
 import qt_themes
 from platformdirs import user_config_path
-from PySide6.QtCore import QEvent, QObject, QProcess, QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import (
+    QEvent,
+    QItemSelectionModel,
+    QObject,
+    QProcess,
+    QSettings,
+    Qt,
+    QTimer,
+    QUrl,
+)
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -56,7 +66,9 @@ from .assembly import (
 )
 from .audio import mix_peak_arguments, peak_measurement_arguments
 from .preview import Preview
-from .three_column import ThreeColumnAssembly
+from .styles.timeline import TimelineClipStyle, TimelineTrackStyle
+from .three_column import ThreeColumnAssembly, TimelineSegment
+from .timeline import CLIP_HEIGHT, CLIP_Y_OFFSET, TRACK_HEIGHT, clip_spans, move_clips
 
 
 def timestamp(seconds):
@@ -711,6 +723,7 @@ class Application(QObject):
         self.probe_next()
 
     def clear(self):
+        self.assembler.selected_timelines.clear()
         self.selected_clip = None
         self.clips.clear()
         self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * self.assembler.divisions.value())]
@@ -722,16 +735,48 @@ class Application(QObject):
         self.refresh()
 
     def divisions_changed(self, value):
+        self.assembler.selected_timelines.clear()
         self.settings.setValue("assembly/divisions", value)
         self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * value)]
         self.save_active_state()
         self.refresh()
 
     def columns_changed(self):
+        self.assembler.selected_timelines.clear()
         self.settings.setValue("assembly/columns", self.assembler.columns.currentData())
         self.assembler.tracks = [[] for _ in range(self.assembler.columns.currentData() * self.assembler.divisions.value())]
         self.render_settings_changed()
         self.save_active_state()
+
+    def clear_timeline_selection(self):
+        self.assembler.selected_timelines.clear()
+        for background in self.assembler.track_backgrounds:
+            TimelineTrackStyle.apply(background, False)
+        self.update_enabled()
+
+    def finish_timeline_edit(self):
+        self.save_active_state()
+        view_range = self.assembler.timeline.getViewBox().viewRange()
+        self.refresh()
+        self.assembler.timeline.getViewBox().setRange(xRange=view_range[0], yRange=view_range[1], padding=0)
+
+    @property
+    def selected_clips(self):
+        return {item.data(Qt.ItemDataRole.UserRole) for item in self.library.selectedItems()}
+
+    @property
+    def target_timelines(self):
+        return self.assembler.selected_timelines or range(len(self.assembler.tracks))
+
+    def sort_timelines(self, longest_first=False):
+        for column in self.target_timelines:
+            self.assembler.tracks[column].sort(key=lambda clip: clip.duration, reverse=longest_first)
+        self.finish_timeline_edit()
+
+    def shuffle_timelines(self):
+        for column in self.target_timelines:
+            random.shuffle(self.assembler.tracks[column])
+        self.finish_timeline_edit()
 
     def rebalance(self, longest_first=False):
         self.assembler.rebalance(self.clips, longest_first=longest_first)
@@ -772,9 +817,17 @@ class Application(QObject):
         self.assembler.segment_bounds = []
         self.assembler.dividers = []
         self.assembler.track_labels = []
+        self.assembler.track_backgrounds = []
+        self.assembler.track_bounds = []
         offset = 0.0
         columns = self.assembler.columns.currentData()
+        heading_height = TRACK_HEIGHT / 2 - (CLIP_Y_OFFSET + CLIP_HEIGHT / 2)
+        self.assembler.timeline.setMinimumHeight(
+            round(columns * (self.assembler.fontMetrics().height() + 8) / heading_height
+                  + self.assembler.timeline.getAxis("bottom").height())
+        )
         for group_start in range(0, len(self.assembler.tracks), columns):
+            group_width = max(1, max(durations[group_start:group_start + columns]))
             self.assembler.division_offsets.append(offset)
             if group_start:
                 divider = pg.InfiniteLine(offset, angle=90, pen=pg.mkPen(palette.text().color(), width=2))
@@ -783,21 +836,26 @@ class Application(QObject):
             for column in range(group_start, group_start + columns):
                 track = self.assembler.tracks[column]
                 y = columns - 1 - column % columns
+                background = pg.BarGraphItem(x0=offset, width=group_width, y=y, height=TRACK_HEIGHT)
+                background.setZValue(-10)
+                TimelineTrackStyle.apply(background, column in self.assembler.selected_timelines)
+                self.assembler.timeline.addItem(background)
+                self.assembler.track_backgrounds.append(background)
+                self.assembler.track_bounds.append((column, offset, offset + group_width, y))
                 heading = pg.TextItem(
                     f"{timeline_name(column)} - {len(track)} clips - {timestamp(durations[column])}",
-                    color=palette.text().color(), anchor=(0, 1),
+                    color=palette.text().color(), anchor=(0, 0.5),
                 )
-                heading.setPos(offset, y + 0.35)
+                heading.textItem.document().setDocumentMargin(8)
+                heading.setPos(offset, y + (CLIP_Y_OFFSET + CLIP_HEIGHT / 2 + TRACK_HEIGHT / 2) / 2)
                 self.assembler.timeline.addItem(heading)
                 self.assembler.track_labels.append(heading)
-                start = offset
-                for number, clip in enumerate(track):
-                    duration = clip_duration(clip, config)
-                    brush = palette.highlight().color()
-                    brush.setAlpha(190 if number % 2 == 0 else 110)
-                    bar = pg.BarGraphItem(
-                        x0=start, width=duration, y=y, height=0.65,
-                        brush=brush, pen=palette.text().color(),
+                for number, (clip_start, clip_end, clip) in enumerate(clip_spans(track, config)):
+                    start = offset + clip_start
+                    duration = clip_end - clip_start
+                    bar = TimelineSegment(
+                        self, column, number,
+                        x0=start, width=duration, y=y + CLIP_Y_OFFSET, height=CLIP_HEIGHT,
                     )
                     bar.setToolTip(f"{timeline_name(column)} - {clip.path.name} - {timestamp(duration)}")
                     self.assembler.timeline.addItem(bar)
@@ -805,19 +863,19 @@ class Application(QObject):
                     self.assembler.segment_bounds.append((column, start, start + duration, clip))
                     label = pg.TextItem(str(number + 1), color=palette.text().color(),
                                         fill=palette.base().color(), anchor=(0.5, 0.5))
-                    label.setPos(start + duration / 2, y)
-                    self.assembler.timeline.addItem(label)
-                    start += duration
-            offset += max(1, max(durations[group_start:group_start + columns]))
+                    label.setParentItem(bar)
+                    label.setPos(start + duration / 2, y + CLIP_Y_OFFSET)
+            offset += group_width
         self.assembler.timeline.setYRange(-0.6, columns - 0.2, padding=0)
         self.assembler.timeline.setXRange(0, offset, padding=0.02)
-        self.select_clip(self.selected_clip)
         self.library.blockSignals(True)
         for row in range(self.library.count()):
             item = self.library.item(row)
             item.setSelected(item.data(Qt.ItemDataRole.UserRole).path in selected_paths)
+            if item.data(Qt.ItemDataRole.UserRole) == self.selected_clip:
+                self.library.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
         self.library.blockSignals(False)
-        self.update_enabled()
+        self.select_clip(self.selected_clip, sync_source=False)
 
     def select_source(self, row=None):
         items = self.library.selectedItems()
@@ -833,6 +891,7 @@ class Application(QObject):
         listings = [self.library] if sync_source else []
         for listing in listings:
             listing.blockSignals(True)
+            listing.clearSelection()
             row = next(
                 (
                     index
@@ -845,17 +904,9 @@ class Application(QObject):
             if row >= 0:
                 listing.scrollToItem(listing.item(row))
             listing.blockSignals(False)
-        self.assembler.active_column, self.assembler.active_row = next(
-            ((column, row) for column, track in enumerate(self.assembler.tracks)
-             for row, source in enumerate(track) if source == clip), (-1, -1)
-        )
+        selected = self.selected_clips
         for source, bar in self.assembler.segment_bars:
-            bar.setOpts(
-                pen=pg.mkPen(
-                    QApplication.palette().text().color(),
-                    width=3 if source == clip else 1,
-                )
-            )
+            TimelineClipStyle.apply(bar, source in selected)
         self.preview.set_clip(clip)
         self.update_enabled()
 
@@ -869,46 +920,54 @@ class Application(QObject):
             [clip for clip in track if clip.path not in paths]
             for track in self.assembler.tracks
         ]
-        self.save_active_state()
         self.selected_clip = None
-        self.refresh()
+        self.finish_timeline_edit()
 
-    def reorder(self, offset):
-        column = self.assembler.active_column
-        row = self.assembler.active_row
-        track = self.assembler.tracks[column]
-        track[row], track[row + offset] = track[row + offset], track[row]
-        self.save_active_state()
-        self.refresh()
-
-    def move_column(self, offset):
-        column = self.assembler.active_column
-        row = self.assembler.active_row
-        clip = self.assembler.tracks[column].pop(row)
-        target = column + offset
-        self.assembler.tracks[target].append(clip)
-        self.save_active_state()
-        self.refresh()
+    def move_selected_clips(self, target):
+        selected = self.selected_clips
+        config = self.render_config()
+        for track in self.assembler.tracks:
+            track[:], _position = move_clips(track, selected, target, config)
+        self.finish_timeline_edit()
 
     def timeline_clicked(self, event):
-        if self.running or self.loading:
+        if self.running or self.loading or event.isAccepted() or event.button() != Qt.MouseButton.LeftButton:
             return
         point = self.assembler.timeline.getViewBox().mapSceneToView(event.scenePos())
         columns = self.assembler.columns.currentData()
         row = columns - 1 - round(point.y())
-        if row in range(columns) and abs(point.y() - (columns - 1 - row)) <= 0.325:
+        if row in range(columns) and abs(point.y() - (columns - 1 - row + CLIP_Y_OFFSET)) <= CLIP_HEIGHT / 2:
             for column, start, end, clip in self.assembler.segment_bounds:
                 if column % columns == row and start <= point.x() < end:
-                    self.select_clip(clip)
-                    break
+                    item = next(self.library.item(i) for i in range(self.library.count())
+                                if self.library.item(i).data(Qt.ItemDataRole.UserRole) == clip)
+                    self.library.blockSignals(True)
+                    selected = not item.isSelected()
+                    self.library.setCurrentItem(item, QItemSelectionModel.SelectionFlag.NoUpdate)
+                    item.setSelected(selected)
+                    self.library.blockSignals(False)
+                    self.select_source()
+                    event.accept()
+                    return
+        for column, start, end, y in self.assembler.track_bounds:
+            if start <= point.x() < end and abs(point.y() - y) <= TRACK_HEIGHT / 2:
+                self.assembler.selected_timelines.symmetric_difference_update({column})
+                TimelineTrackStyle.apply(self.assembler.track_backgrounds[column], column in self.assembler.selected_timelines)
+                self.update_enabled()
+                event.accept()
+                return
 
     def update_enabled(self):
         idle = not self.loading and not self.running
         for widget in (self.open_button, self.open_action, self.clear_action):
             widget.setEnabled(idle)
         scanned = bool(self.clips) and all(isinstance(clip, Clip) for clip in self.clips)
+        selected_count = len(self.assembler.selected_timelines)
+        self.assembler.timelines_group.setTitle(f"Timelines ({selected_count if selected_count else 'All'})")
+        self.assembler.select_no_timelines_button.setEnabled(idle and selected_count > 0)
         self.assembler.balance_button.setEnabled(idle and scanned)
         self.assembler.longest_button.setEnabled(idle and scanned)
+        self.assembler.shuffle_button.setEnabled(idle and scanned)
         self.assembler.create_button.setEnabled(idle and bool(self.clips))
         self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
@@ -925,21 +984,24 @@ class Application(QObject):
         self.library.setEnabled(idle)
         removable = idle and bool(self.library.selectedItems())
         self.assembler.remove_button.setEnabled(removable)
+        self.assembler.select_none_button.setEnabled(removable)
         self.remove_sources_button.setEnabled(removable)
         self.clear_sources_button.setEnabled(idle and bool(self.clips))
         self.parallel_scanning.setEnabled(idle)
         self.scan_threads.setEnabled(idle)
         self.assembler.divisions.setEnabled(idle)
         self.assembler.columns.setEnabled(idle)
-        column = self.assembler.active_column
-        row = self.assembler.active_row
-        selected = idle and row >= 0 and len(self.library.selectedItems()) == 1
-        self.assembler.up_button.setEnabled(selected and row > 0)
-        self.assembler.down_button.setEnabled(
-            selected and row < len(self.assembler.tracks[column]) - 1
-        )
-        self.assembler.left_button.setEnabled(selected and column > 0)
-        self.assembler.right_button.setEnabled(selected and column < len(self.assembler.tracks) - 1)
+        selected = self.selected_clips
+        count = sum(clip in selected for track in self.assembler.tracks for clip in track)
+        self.assembler.clips_group.setTitle(f"Clips ({count})")
+        earlier = idle and any(track[i] in selected and track[i - 1] not in selected
+                               for track in self.assembler.tracks for i in range(1, len(track)))
+        later = idle and any(track[i] in selected and track[i + 1] not in selected
+                             for track in self.assembler.tracks for i in range(len(track) - 1))
+        self.assembler.forward_button.setEnabled(later)
+        self.assembler.start_button.setEnabled(earlier)
+        self.assembler.backward_button.setEnabled(earlier)
+        self.assembler.end_button.setEnabled(later)
 
     def choose_export(self):
         if not self.output_folder.text().strip():

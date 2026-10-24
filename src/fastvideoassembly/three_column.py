@@ -1,10 +1,13 @@
 """Column assembler tab; portrait eligibility is local to this assembler."""
 
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QGridLayout,
+    QGroupBox,
     QLabel,
     QPushButton,
     QSpinBox,
@@ -13,6 +16,48 @@ from PySide6.QtWidgets import (
 )
 
 from .assembly import balance
+from .timeline import TRACK_HEIGHT, move_clips
+
+
+class TimelineSegment(pg.BarGraphItem):
+    def __init__(self, controller, column, index, **options):
+        super().__init__(**options)
+        self.setFlag(self.GraphicsItemFlag.ItemClipsChildrenToShape)
+        self.controller = controller
+        self.column = column
+        self.index = index
+
+    def hoverEvent(self, event):
+        if not self.controller.running and not self.controller.loading:
+            event.acceptDrags(Qt.MouseButton.LeftButton)
+
+    def mouseDragEvent(self, event):
+        controller = self.controller
+        if event.button() != Qt.MouseButton.LeftButton or controller.running or controller.loading:
+            event.ignore()
+            return
+        event.accept()
+        assembler = controller.assembler
+        timeline = assembler.timeline
+        track = assembler.tracks[self.column]
+        y = assembler.columns.currentData() - 1 - self.column % assembler.columns.currentData()
+        _column, start, end, _y = assembler.track_bounds[self.column]
+        if event.isStart():
+            selected = controller.selected_clips
+            controller.select_clip(track[self.index], sync_source=track[self.index] not in selected)
+            self.dragged_clips = controller.selected_clips
+            self.marker = pg.PlotCurveItem(pen=pg.mkPen(QApplication.palette().text().color(), width=3))
+            timeline.addItem(self.marker, ignoreBounds=True)
+        point = timeline.getViewBox().mapSceneToView(event.scenePos())
+        valid = abs(point.y() - y) <= TRACK_HEIGHT / 2 and start <= point.x() <= end
+        reordered, position = move_clips(track, self.dragged_clips, point.x() - start, controller.render_config())
+        self.marker.setData([start + position] * 2, [y - 0.4, y + 0.4])
+        self.marker.setVisible(valid)
+        if event.isFinish():
+            timeline.removeItem(self.marker)
+            if valid and reordered != track:
+                track[:] = reordered
+                controller.finish_timeline_edit()
 
 
 class ThreeColumnAssembly(QWidget):
@@ -28,14 +73,12 @@ class ThreeColumnAssembly(QWidget):
         self.divisions.setValue(controller.settings.value("assembly/divisions", 1, type=int))
         self.divisions.setAccessibleName("Divisions")
         self.tracks = [[] for _ in range(self.columns.currentData() * self.divisions.value())]
-        self.active_column = -1
-        self.active_row = -1
+        self.selected_timelines = set()
         layout = QVBoxLayout(self)
         self.timeline = pg.PlotWidget()
         self.timeline.setAccessibleName(
             "Timelines with a shared time axis in seconds"
         )
-        self.timeline.setMinimumHeight(180)
         self.timeline.setLabel("bottom", "Time", units="s")
         self.timeline.getAxis("left").setTicks([])
         self.timeline.setMouseEnabled(x=True, y=False)
@@ -43,39 +86,49 @@ class ThreeColumnAssembly(QWidget):
         self.timeline.hideButtons()
         self.timeline.scene().sigMouseClicked.connect(controller.timeline_clicked)
         layout.addWidget(self.timeline, 1)
-        edit_buttons = QGridLayout()
-        self.balance_button = QPushButton("Shortest First")
-        self.balance_button.clicked.connect(controller.rebalance)
-        edit_buttons.addWidget(self.balance_button, 0, 0)
-        self.longest_button = QPushButton("Longest First")
-        self.longest_button.setToolTip(
-            "Balance total column durations, then sort each column from longest to shortest."
-        )
+        self.timelines_group = QGroupBox("Timelines (All)")
+        ordering_buttons = QGridLayout(self.timelines_group)
+        self.balance_button = QPushButton("Organize Shortest Clips First")
+        self.balance_button.clicked.connect(controller.sort_timelines)
+        ordering_buttons.addWidget(self.balance_button, 0, 0)
+        self.longest_button = QPushButton("Organize Longest Clips First")
         self.longest_button.clicked.connect(
-            lambda: controller.rebalance(longest_first=True)
+            lambda: controller.sort_timelines(longest_first=True)
         )
-        edit_buttons.addWidget(self.longest_button, 0, 1)
-        self.up_button = QPushButton("Move earlier")
-        self.up_button.clicked.connect(lambda: controller.reorder(-1))
-        self.down_button = QPushButton("Move later")
-        self.down_button.clicked.connect(lambda: controller.reorder(1))
-        self.left_button = QPushButton("Previous timeline")
-        self.left_button.clicked.connect(lambda: controller.move_column(-1))
-        self.right_button = QPushButton("Next timeline")
-        self.right_button.clicked.connect(lambda: controller.move_column(1))
+        ordering_buttons.addWidget(self.longest_button, 0, 1)
+        self.shuffle_button = QPushButton("Shuffle")
+        self.shuffle_button.clicked.connect(controller.shuffle_timelines)
+        ordering_buttons.addWidget(self.shuffle_button, 1, 0)
+        self.select_no_timelines_button = QPushButton("Select None")
+        self.select_no_timelines_button.clicked.connect(controller.clear_timeline_selection)
+        ordering_buttons.addWidget(self.select_no_timelines_button, 1, 1)
+        layout.addWidget(self.timelines_group)
+        self.clips_group = QGroupBox("Clips (0)")
+        clip_buttons = QGridLayout(self.clips_group)
+        self.forward_button = QPushButton("Move Forward")
+        self.forward_button.clicked.connect(lambda: controller.move_selected_clips("forward"))
+        self.backward_button = QPushButton("Move Backward")
+        self.backward_button.clicked.connect(lambda: controller.move_selected_clips("backward"))
+        self.start_button = QPushButton("Move to Start")
+        self.start_button.clicked.connect(lambda: controller.move_selected_clips("start"))
+        self.end_button = QPushButton("Move to End")
+        self.end_button.clicked.connect(lambda: controller.move_selected_clips("end"))
         self.remove_button = QPushButton("Remove selected")
         self.remove_button.clicked.connect(controller.remove_selected_clip)
-        edit_buttons.addWidget(self.remove_button, 0, 2, 1, 2)
+        self.select_none_button = QPushButton("Select None")
+        self.select_none_button.clicked.connect(controller.library.clearSelection)
         for index, button in enumerate(
             (
-                self.up_button,
-                self.down_button,
-                self.left_button,
-                self.right_button,
+                self.forward_button,
+                self.backward_button,
+                self.start_button,
+                self.end_button,
             )
         ):
-            edit_buttons.addWidget(button, 1, index)
-        layout.addLayout(edit_buttons)
+            clip_buttons.addWidget(button, 0, index)
+        clip_buttons.addWidget(self.select_none_button, 1, 0, 1, 2)
+        clip_buttons.addWidget(self.remove_button, 1, 2, 1, 2)
+        layout.addWidget(self.clips_group)
         final_row = QGridLayout()
         final_row.addWidget(controller.combine, 0, 0)
         final_row.addWidget(QLabel("Columns"), 0, 1)

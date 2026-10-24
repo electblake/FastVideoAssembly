@@ -1,5 +1,6 @@
 import subprocess
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -8,7 +9,7 @@ from PySide6.QtCore import QPointF, Qt, QUrl
 from PySide6.QtMultimedia import QMediaPlayer
 
 from fastvideoassembly import app
-from fastvideoassembly.assembly import Clip, RenderConfig
+from fastvideoassembly.assembly import Clip, RenderConfig, balance
 
 
 @pytest.mark.parametrize("suffix", ["_FINAL", "_A", "_B", "_C"])
@@ -481,21 +482,18 @@ def test_shared_selection_and_removal(controller, preview_source, tmp_path, orig
     if origin == "source":
         controller.library.setCurrentRow(0)
     else:
-        event = Mock()
+        event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
         event.scenePos.return_value = (
             controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(1, 1))
         )
         controller.timeline_clicked(event)
     assert controller.selected_clip == clips[0]
     assert controller.library.currentRow() == 0
-    assert controller.assembler.active_row == 0
-    assert controller.assembler.active_column == 1
     assert controller.preview.player.source() == QUrl.fromLocalFile(str(preview_source))
-    assert controller.assembler.down_button.isEnabled()
+    assert controller.assembler.forward_button.isEnabled()
     assert controller.assembler.remove_button.isEnabled()
     controller.refresh()
     assert controller.selected_clip == clips[0]
-    assert controller.assembler.active_row == 0
     controller.assembler.remove_button.click()
     assert controller.clips == clips[1:]
     assert controller.assembler.tracks == [[clips[1]], [clips[2]], [clips[3]]]
@@ -580,8 +578,7 @@ def test_excluded_source_can_be_selected_and_removed(controller, preview_source)
     controller.library.setCurrentRow(0)
     assert controller.selected_clip == clip
     assert controller.assembler.remove_button.isEnabled()
-    assert not controller.assembler.up_button.isEnabled()
-    assert not controller.assembler.right_button.isEnabled()
+    assert not controller.assembler.forward_button.isEnabled()
     controller.assembler.remove_button.click()
     assert controller.clips == []
     assert preview_source.exists()
@@ -810,7 +807,7 @@ def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tm
         4 / 30
     )
     assert controller.assembler.segment_bars[1][1].opts["x0"] == pytest.approx(4 / 30)
-    event = Mock()
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
     event.scenePos.return_value = (
         controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(0.12, 2))
     )
@@ -835,11 +832,8 @@ def test_empty_and_editable_tracks(controller):
     assert controller.assembler.export_button.isEnabled()
     controller.select_clip(controller.assembler.tracks[0][0])
     original = list(controller.assembler.tracks[0])
-    controller.assembler.down_button.click()
+    controller.assembler.forward_button.click()
     assert controller.assembler.tracks[0] == original[::-1]
-    selected = controller.assembler.tracks[0][1]
-    controller.assembler.right_button.click()
-    assert controller.assembler.tracks[1][-1] == selected
     assert sum(map(len, controller.assembler.tracks)) == 6
     controller.clear()
     assert not controller.assembler.export_button.isEnabled()
@@ -952,8 +946,8 @@ def test_busy_locks_edits(controller):
 
 
 def test_order_buttons_keep_equal_track_totals(controller):
-    assert controller.assembler.balance_button.text() == "Shortest First"
-    assert controller.assembler.longest_button.text() == "Longest First"
+    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
+    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
     assert not controller.assembler.longest_button.isEnabled()
     controller.clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 19)]
     controller.rebalance()
@@ -1104,7 +1098,7 @@ def test_parallel_true_peak_export(controller, preview_source, tmp_path, qtbot, 
     assert set(controller.audio_peaks) == {clip.path for clip in clips} | {tmp_path / "parallel_FINAL.mp4"}
     assert (tmp_path / "parallel_FINAL.mp4").exists()
 
-def test_click_current_clip_replaces_source_multi_selection(controller, tmp_path, qtbot, monkeypatch):
+def test_click_current_clip_toggles_source_multi_selection(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, "set_clip", Mock())
     clips = [Clip(tmp_path / f"{i}.mp4", 3, 60, 120) for i in range(3)]
     controller.clips = clips[:]
@@ -1114,15 +1108,13 @@ def test_click_current_clip_replaces_source_multi_selection(controller, tmp_path
     library.setCurrentRow(0)
     library.item(1).setSelected(True)
     assert len(library.selectedItems()) == 2
-    assert not controller.assembler.right_button.isEnabled()
     assert controller.assembler.remove_button.text() == "Remove selected"
-    event = Mock()
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
     event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(1, 2))
     controller.timeline_clicked(event)
-    assert [library.row(item) for item in library.selectedItems()] == [0]
-    assert controller.assembler.right_button.isEnabled()
+    assert [library.row(item) for item in library.selectedItems()] == [1]
     controller.assembler.remove_button.click()
-    assert controller.clips == clips[1:]
+    assert controller.clips == [clips[0], clips[2]]
 
 
 def test_ctrl_deselect_updates_preview_and_disables_empty_selection(controller, tmp_path, qtbot, monkeypatch):
@@ -1146,7 +1138,6 @@ def test_ctrl_deselect_updates_preview_and_disables_empty_selection(controller, 
     preview.assert_called_with(None)
     assert not controller.remove_sources_button.isEnabled()
     assert not controller.assembler.remove_button.isEnabled()
-    assert not controller.assembler.right_button.isEnabled()
     controller.refresh()
     assert not listing.selectedItems()
 
@@ -1225,7 +1216,7 @@ def test_drop_always_imports_as_copy_and_rejects_remote_urls(controller, tmp_pat
 
     mime = QMimeData()
     mime.setUrls([QUrl.fromLocalFile(str(tmp_path)) if local else QUrl('https://example.com/video.mp4')])
-    event = Mock()
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
     event.type.return_value = QEvent.Type.Drop
     event.mimeData.return_value = mime
     add = Mock()
@@ -1443,8 +1434,7 @@ def test_active_timeline_order_restores_after_each_edit(controller, tmp_path, qt
     controller.clips = [Clip(tmp_path / f"order{i}.mp4", i + 1, 60, 120, True) for i in range(6)]
     controller.rebalance()
     controller.select_clip(controller.assembler.tracks[0][0])
-    controller.reorder(1)
-    controller.move_column(1)
+    controller.move_selected_clips("forward")
     expected = [track[:] for track in controller.assembler.tracks]
     restored = app.Application()
     qtbot.addWidget(restored.window)
@@ -1668,17 +1658,12 @@ def test_divisions_balance_display_selection_and_settings(controller, tmp_path, 
     assert [set(track) for track in controller.assembler.tracks] == members
     assert all([c.duration for c in track] == sorted([c.duration for c in track], reverse=True) for track in controller.assembler.tracks)
     _column, start, end, clip = next(bound for bound in controller.assembler.segment_bounds if bound[0] == 4)
-    event = Mock()
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
     event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF((start + end) / 2, 1))
     controller.timeline_clicked(event)
     assert controller.selected_clip == clip
-    assert controller.assembler.active_column == 4
     assert controller.library.currentItem().data(Qt.ItemDataRole.UserRole) == clip
     controller.select_clip(controller.assembler.tracks[2][0])
-    moved = controller.selected_clip
-    controller.assembler.right_button.click()
-    assert controller.assembler.active_column == 3
-    assert controller.assembler.tracks[3][-1] == moved
     assert sum(map(len, controller.assembler.tracks)) == 18
     controller.settings.sync()
     restored = app.Application()
@@ -1744,11 +1729,10 @@ def test_four_columns_layout_and_persistence(controller, tmp_path, qtbot, monkey
     assert len(controller.assembler.track_labels) == 8
     for column in range(8):
         _, start, end, clip = next(bound for bound in controller.assembler.segment_bounds if bound[0] == column)
-        event = Mock()
+        event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
         event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF((start + end) / 2, 3 - column % 4))
         controller.timeline_clicked(event)
         assert controller.selected_clip == clip
-        assert controller.assembler.active_column == column
     restored = app.Application()
     qtbot.addWidget(restored.window)
     assert restored.assembler.columns.currentData() == 4
@@ -1848,3 +1832,360 @@ def test_columns_only_never_schedules_output_cleanup(controller, tmp_path, monke
     assert all(path.parent != tmp_path for paths in controller.column_cleanup.values() for path in paths)
     controller.running = False
     controller.export_directory.cleanup()
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+@pytest.mark.parametrize("division", [0, 1])
+@pytest.mark.parametrize("source, drop, expected", [
+    (2, 0.2, [0, 2, 1]),
+    (2, 1.1, [0, 1, 2]),
+    (0, 5.9, [1, 2, 0]),
+    (1, 2.0, [0, 2, 1]),
+])
+def test_timeline_drag_snaps_and_preserves_duration(controller, tmp_path, qtbot, columns, division, source, drop, expected):
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    clips = [Clip(tmp_path / f"drag{i}.mp4", i + 1, 60, 120) for i in range(3)]
+    other = Clip(tmp_path / "other.mp4", 8, 60, 120)
+    column = division * columns + columns - 1
+    controller.clips = [*clips, other]
+    controller.assembler.tracks[0] = [other]
+    controller.assembler.tracks[column] = clips.copy()
+    controller.refresh()
+    timeline = controller.assembler.timeline
+    timeline.setXRange(0, 17, padding=0)
+    view_range = timeline.getViewBox().viewRange()
+    offset = controller.assembler.division_offsets[division]
+    bar = next(bar for clip, bar in controller.assembler.segment_bars if clip == clips[source])
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
+    event.button.return_value = Qt.MouseButton.LeftButton
+    event.isStart.return_value = True
+    event.isFinish.return_value = False
+    event.scenePos.return_value = timeline.getViewBox().mapViewToScene(QPointF(offset + drop, 0))
+    bar.mouseDragEvent(event)
+    assert bar.marker.isVisible()
+    event.isStart.return_value = False
+    event.isFinish.return_value = True
+    bar.mouseDragEvent(event)
+    assert controller.assembler.tracks[column] == [clips[i] for i in expected]
+    assert controller.assembler.tracks[0] == [other]
+    assert controller.selected_clip == clips[source]
+    assert controller.library.currentItem().data(Qt.ItemDataRole.UserRole) == clips[source]
+    bounds = [(start, end) for c, start, end, _ in controller.assembler.segment_bounds if c == column]
+    assert bounds[0][0] == offset
+    assert bounds[-1][1] - offset == pytest.approx(6)
+    assert all(left[1] == right[0] for left, right in pairwise(bounds))
+    assert timeline.getViewBox().viewRange() == view_range
+    controller.save_active_state()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.tracks[column] == [clips[i] for i in expected]
+    controller.rebalance()
+    assert controller.assembler.tracks == balance(controller.clips, track_count=columns * 2)
+
+
+@pytest.mark.parametrize("drop", [QPointF(1, 1), QPointF(-1, 2), QPointF(7, 2)])
+def test_timeline_drag_outside_original_track_does_not_move(controller, tmp_path, drop):
+    clips = [Clip(tmp_path / f"drag{i}.mp4", i + 1, 60, 120) for i in range(3)]
+    controller.clips = clips
+    controller.assembler.tracks[0] = clips.copy()
+    controller.refresh()
+    bar = controller.assembler.segment_bars[-1][1]
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
+    event.button.return_value = Qt.MouseButton.LeftButton
+    event.isStart.return_value = True
+    event.isFinish.return_value = True
+    event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(drop)
+    bar.mouseDragEvent(event)
+    assert controller.assembler.tracks[0] == clips
+    assert bar.marker not in controller.assembler.timeline.items()
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+def test_timeline_mouse_drag_and_click(controller, tmp_path, qtbot, columns):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    clips = [Clip(tmp_path / f"mouse{i}.mp4", 2, 60, 120) for i in range(3)]
+    controller.clips = clips
+    controller.assembler.tracks[-1] = clips.copy()
+    controller.refresh()
+    qtbot.wait(100)
+    timeline = controller.assembler.timeline
+    viewport = timeline.viewport()
+    start = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(5, 0)))
+    end = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(0.1, 0)))
+    qtbot.mouseMove(viewport, start)
+    qtbot.mousePress(viewport, Qt.MouseButton.LeftButton, pos=start)
+    move = QMouseEvent(QEvent.Type.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+                       Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    app.QApplication.sendEvent(viewport, move)
+    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=end)
+    assert controller.assembler.tracks[-1] == [clips[0], clips[2], clips[1]]
+    assert controller.selected_clip == clips[2]
+    click = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(1, 0)))
+    qtbot.mouseClick(viewport, Qt.MouseButton.LeftButton, pos=click)
+    assert controller.selected_clip == clips[0]
+
+
+@pytest.mark.parametrize("busy", ["running", "loading"])
+def test_timeline_drag_disabled_while_busy(controller, tmp_path, busy):
+    clip = Clip(tmp_path / "busy.mp4", 2, 60, 120)
+    controller.clips = [clip]
+    controller.assembler.tracks[0] = [clip]
+    controller.refresh()
+    bar = controller.assembler.segment_bars[0][1]
+    setattr(controller, busy, True)
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
+    event.button.return_value = Qt.MouseButton.LeftButton
+    bar.hoverEvent(event)
+    event.acceptDrags.assert_not_called()
+    bar.mouseDragEvent(event)
+    event.ignore.assert_called_once()
+    setattr(controller, busy, False)
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns):
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    tracks = [[Clip(tmp_path / f"{c}-{i}.mp4", duration, 60, 120)
+               for i, duration in enumerate([3, 1, 2])] for c in range(columns * 2)]
+    controller.clips = [clip for track in tracks for clip in track]
+    controller.assembler.tracks = [track[:] for track in tracks]
+    controller.refresh()
+    qtbot.wait(100)
+    timeline = controller.assembler.timeline
+
+    def click(column, x, y_offset=0.43):
+        _, start, _, y = controller.assembler.track_bounds[column]
+        position = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(start + x, y + y_offset)))
+        qtbot.mouseClick(timeline.viewport(), Qt.MouseButton.LeftButton, pos=position)
+
+    click(0, 1)
+    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
+    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    click(columns + 1, 1)
+    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
+    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.selected_timelines == {0, columns + 1}
+    assert controller.assembler.track_backgrounds[0].property("selected")
+    assert controller.assembler.track_backgrounds[0].opts["brush"].alpha() == 28
+    click(0, 1, 0)
+    assert controller.selected_clip == tracks[0][0]
+    assert controller.assembler.selected_timelines == {0, columns + 1}
+    bar = controller.assembler.segment_bars[0][1]
+    assert bar.property("active")
+    assert bar.opts["brush"].alpha() == 255
+    assert bar.opts["pen"].width() == 3
+    controller.assembler.balance_button.click()
+    for column, track in enumerate(controller.assembler.tracks):
+        assert track == (sorted(tracks[column], key=lambda clip: clip.duration) if column in {0, columns + 1} else tracks[column])
+    controller.assembler.longest_button.click()
+    assert [clip.duration for clip in controller.assembler.tracks[0]] == [3, 2, 1]
+    assert controller.assembler.tracks[1] == tracks[1]
+    click(0, 1)
+    assert controller.assembler.selected_timelines == {columns + 1}
+    assert not controller.assembler.track_backgrounds[0].property("selected")
+    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
+    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    controller.select_clip(None)
+    for _, bar in controller.assembler.segment_bars:
+        assert not bar.property("active")
+        assert bar.opts["brush"].alpha() == (190 if bar.index % 2 == 0 else 110)
+        assert bar.opts["pen"].width() == 1
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=True))
+    controller.timeline_clicked(event)
+    assert controller.assembler.selected_timelines == {columns + 1}
+    controller.apply_appearance()
+    assert controller.assembler.track_backgrounds[columns + 1].property("selected")
+    controller.assembler.columns.setCurrentIndex(1 if columns == 3 else 0)
+    assert not controller.assembler.selected_timelines
+    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
+    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+
+
+@pytest.mark.parametrize("action, expected", [
+    (-1, [1, 2, 4, 0, 3]), (1, [0, 3, 1, 2, 4]),
+    ("start", [1, 2, 4, 0, 3]), ("end", [0, 3, 1, 2, 4]),
+])
+def test_move_multiple_selected_clips(controller, tmp_path, qtbot, action, expected):
+    tracks = [[Clip(tmp_path / f"{c}-{i}.mp4", i + 1, 60, 120) for i in range(5)] for c in range(3)]
+    controller.clips = [clip for track in tracks for clip in track]
+    controller.assembler.tracks = [track[:] for track in tracks]
+    controller.refresh()
+    for column in [0, 2]:
+        for index in [1, 2, 4]:
+            _, start, end, _clip = next(bound for bound in controller.assembler.segment_bounds
+                                       if bound[0] == column and bound[3] == tracks[column][index])
+            event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
+            event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF((start + end) / 2, 2 - column))
+            controller.timeline_clicked(event)
+    assert len(controller.library.selectedItems()) == 6
+    controller.timeline_clicked(event)
+    assert len(controller.library.selectedItems()) == 5
+    assert controller.assembler.clips_group.title() == "Clips (5)"
+    controller.timeline_clicked(event)
+    assert len(controller.library.selectedItems()) == 6
+    assert controller.assembler.clips_group.title() == "Clips (6)"
+    assert controller.assembler.forward_button.text() == "Move Forward"
+    assert controller.assembler.backward_button.text() == "Move Backward"
+    assert controller.assembler.start_button.text() == "Move to Start"
+    assert controller.assembler.end_button.text() == "Move to End"
+    buttons = {-1: controller.assembler.backward_button, 1: controller.assembler.forward_button,
+               "start": controller.assembler.start_button, "end": controller.assembler.end_button}
+    buttons[action].click()
+    assert controller.assembler.tracks[1] == tracks[1]
+    for column in [0, 2]:
+        assert controller.assembler.tracks[column] == [tracks[column][i] for i in expected]
+    assert len(controller.library.selectedItems()) == 6
+    assert sum(bar.property("active") for _, bar in controller.assembler.segment_bars) == 6
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.tracks == controller.assembler.tracks
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+@pytest.mark.parametrize("drop, expected", [(0.1, [0, 1, 3, 2, 4]), (2.1, [0, 2, 4, 1, 3]), (4.9, [0, 2, 4, 1, 3])])
+def test_drag_disjoint_selected_clips_as_block(controller, tmp_path, qtbot, columns, drop, expected):
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    column = columns * 2 - 1
+    clips = [Clip(tmp_path / f"block{i}.mp4", 1, 60, 120) for i in range(5)]
+    controller.clips = clips
+    controller.assembler.tracks[column] = clips.copy()
+    controller.refresh()
+    controller.library.item(1).setSelected(True)
+    controller.library.item(3).setSelected(True)
+    bar = next(bar for clip, bar in controller.assembler.segment_bars if clip == clips[3])
+    offset = controller.assembler.division_offsets[1]
+    event = Mock(button=Mock(return_value=Qt.MouseButton.LeftButton), isAccepted=Mock(return_value=False))
+    event.isStart.return_value = True
+    event.isFinish.return_value = False
+    event.scenePos.return_value = controller.assembler.timeline.getViewBox().mapViewToScene(QPointF(offset + drop, 0))
+    bar.mouseDragEvent(event)
+    assert len(controller.library.selectedItems()) == 2
+    event.isStart.return_value = False
+    event.isFinish.return_value = True
+    bar.mouseDragEvent(event)
+    assert controller.assembler.tracks[column] == [clips[i] for i in expected]
+    assert len(controller.library.selectedItems()) == 2
+    assert sum(bar.property("active") for _, bar in controller.assembler.segment_bars) == 2
+    bounds = [(start, end) for c, start, end, _ in controller.assembler.segment_bounds if c == column]
+    assert bounds[-1][1] - bounds[0][0] == pytest.approx(5)
+    assert all(left[1] == right[0] for left, right in pairwise(bounds))
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.tracks == controller.assembler.tracks
+
+
+@pytest.mark.parametrize("index", [0, 2])
+def test_clip_move_directions_at_timeline_ends(controller, tmp_path, index):
+    clips = [Clip(tmp_path / f"direction{i}.mp4", 1, 60, 120) for i in range(3)]
+    controller.clips = clips
+    controller.assembler.tracks[0] = clips.copy()
+    controller.refresh()
+    controller.select_clip(clips[index])
+    forward = controller.assembler.forward_button
+    backward = controller.assembler.backward_button
+    assert forward.text() == "Move Forward"
+    assert backward.text() == "Move Backward"
+    assert forward.isEnabled() == (index == 0)
+    assert backward.isEnabled() == (index == 2)
+    (forward if index == 0 else backward).click()
+    assert controller.assembler.tracks[0].index(clips[index]) == 1
+    assert forward.isEnabled()
+    assert backward.isEnabled()
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+@pytest.mark.parametrize("selection", [set(), {0}, {0, 2}])
+def test_shuffle_within_target_timelines(controller, tmp_path, qtbot, monkeypatch, columns, selection):
+    import random
+
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    tracks = [[Clip(tmp_path / f"shuffle{c}-{i}.mp4", i + 1, 60, 120) for i in range(5)] for c in range(columns * 2)]
+    controller.clips = [clip for track in tracks for clip in track]
+    controller.assembler.tracks = [track[:] for track in tracks]
+    controller.assembler.selected_timelines = selection.copy()
+    controller.refresh()
+    controller.select_clip(tracks[0][0])
+    view_range = controller.assembler.timeline.getViewBox().viewRange()
+    shuffle = Mock(side_effect=random.Random(12).shuffle)
+    monkeypatch.setattr(app.random, "shuffle", shuffle)
+    controller.assembler.shuffle_button.click()
+    targets = selection or set(range(columns * 2))
+    assert shuffle.call_count == len(targets)
+    for column, track in enumerate(controller.assembler.tracks):
+        assert set(track) == set(tracks[column])
+        assert sum(clip.duration for clip in track) == sum(clip.duration for clip in tracks[column])
+        if column not in targets:
+            assert track == tracks[column]
+    assert any(controller.assembler.tracks[column] != tracks[column] for column in targets)
+    assert controller.assembler.selected_timelines == selection
+    assert controller.selected_clip == tracks[0][0]
+    assert controller.assembler.timeline.getViewBox().viewRange() == view_range
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.assembler.tracks == controller.assembler.tracks
+    controller.running = True
+    controller.update_enabled()
+    assert not controller.assembler.shuffle_button.isEnabled()
+    controller.running = False
+
+
+@pytest.mark.parametrize("columns", [3, 4])
+@pytest.mark.parametrize("division", [0, 1])
+@pytest.mark.parametrize("drop", [15.1, 39.9])
+def test_real_drag_marker_matches_final_start_after_gap_closure(controller, tmp_path, qtbot, columns, division, drop):
+    from PySide6.QtCore import QEvent
+    from PySide6.QtGui import QMouseEvent
+
+    controller.assembler.columns.setCurrentIndex(controller.assembler.columns.findData(columns))
+    controller.assembler.divisions.setValue(2)
+    column = division * columns
+    clips = [Clip(tmp_path / f"actual{i}.mp4", 10, 60, 120) for i in range(4)]
+    controller.clips = clips
+    controller.assembler.tracks[column] = clips.copy()
+    controller.refresh()
+    controller.select_clip(clips[0])
+    controller.library.item(2).setSelected(True)
+    qtbot.wait(100)
+    timeline = controller.assembler.timeline
+    viewport = timeline.viewport()
+    offset = controller.assembler.division_offsets[division]
+    y = columns - 1
+    start = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(offset + 5, y)))
+    end = timeline.mapFromScene(timeline.getViewBox().mapViewToScene(QPointF(offset + drop, y)))
+    qtbot.mouseMove(viewport, start)
+    qtbot.mousePress(viewport, Qt.MouseButton.LeftButton, pos=start)
+    move = QMouseEvent(QEvent.Type.MouseMove, QPointF(end), QPointF(viewport.mapToGlobal(end)),
+                      Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    app.QApplication.sendEvent(viewport, move)
+    bar = controller.assembler.segment_bars[0][1]
+    assert bar.marker.isVisible()
+    marker_x = bar.marker.getData()[0][0]
+    assert marker_x == pytest.approx(offset + 20)
+    qtbot.mouseRelease(viewport, Qt.MouseButton.LeftButton, pos=end)
+    assert controller.assembler.tracks[column] == [clips[1], clips[3], clips[0], clips[2]]
+    first_moved = next(bound for bound in controller.assembler.segment_bounds if bound[3] == clips[0])
+    assert first_moved[1] == pytest.approx(marker_x)
+    assert len(controller.library.selectedItems()) == 2
+    assert not controller.assembler.selected_timelines
+    assert bar.marker not in timeline.items()
+
+
+def test_organize_all_never_redistributes_manual_timelines(controller, tmp_path):
+    clips = [Clip(tmp_path / f"manual{i}.mp4", i + 1, 60, 120) for i in range(6)]
+    controller.clips = clips
+    controller.assembler.tracks = [[clips[5], clips[0], clips[3]], [clips[1]], [clips[4], clips[2]]]
+    originals = [track[:] for track in controller.assembler.tracks]
+    controller.refresh()
+    for button, reverse in [(controller.assembler.balance_button, False), (controller.assembler.longest_button, True)]:
+        button.click()
+        for track, original in zip(controller.assembler.tracks, originals):
+            assert track == sorted(original, key=lambda clip: clip.duration, reverse=reverse)
+    controller.assembler.select_none_button.click()
+    assert controller.assembler.clips_group.title() == "Clips (0)"

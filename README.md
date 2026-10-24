@@ -17,7 +17,7 @@ Use Add Videos or Ctrl+O to select videos and folders together, drop files/folde
 `uv run fastvideoassembly "C:\Videos"`. Imports include immediate MP4, MKV, MOV,
 AVI and WebM files, without recursion or duplicates. Importing adds to the
 library without changing timelines. Click Create Timelines to build the arrangement;
-Shortest First and Longest First explicitly rebuild and sort it. Clear assembly starts over.
+Organize and Shuffle change the order within existing timelines. Clear assembly starts over.
 One active source list and its scanned metadata are saved in `settings.ini` under
 `platformdirs.user_config_path(APP_NAME, appauthor=False)`. QSettings stores native
 INI values and arrays, with no JSON storage or project files. Each completed scan
@@ -52,26 +52,36 @@ Runtime and throughput exclude paused time.
 
 The central timeline uses a shared seconds axis and duration-scaled blocks,
 including the same output-frame rounding used by rendering.
-Click a block or list entry to select it. Move earlier/later changes playback
-order; move previous/next transfers the clip to the end of an adjacent timeline,
-including across division boundaries.
-**Shortest First** sorts clips by ascending duration; **Longest First** sorts
-by descending duration. Both buttons first redistribute all eligible source clips
-to keep all timeline totals similar; ordering does not change those totals.
-The former Balanced ordering has been removed because alternating duration ranks
-did not distribute clip lengths evenly over playback time.
-Selecting a source or timeline segment shares one selection across both views.
-The dockable **Preview** above Render Settings
-shows the selected source with Play/Pause, Stop, and a scrubber.
-**Remove selected** removes the source and its timeline entries from the
-assembly without deleting the file or reordering other clips. Use either sorting
-button when you want to redistribute the remaining clips.
+Click a clip to toggle its selection; multiple clips can remain selected. The source
+list and timeline share clip selection, and the Preview dock shows the active clip.
+The Clips group title shows the selected count. Select None clears clip selection.
+Move Forward moves toward the end, and Move Backward moves toward the start.
+Move to Start and Move to End place selected clips at the corresponding end.
+Selected clips form one contiguous block in their original order within each timeline;
+remaining clips close the vacated gaps without changing membership or total duration.
+
+Drag a selected clip to move the selected block within that timeline. Placement uses
+the first clip boundary at or after the drop time after removing the selected clips.
+The insertion marker shows the final block start. If the requested time is beyond the
+remaining clips, the block is appended: its start cannot exceed the remaining duration
+without adding a gap or extending the timeline. Releasing outside the original timeline
+cancels the move. Clip numbers and their backgrounds are clipped to their segments.
+
+Click unused space in a timeline to toggle timeline selection independently of clip
+selection. The Timelines title shows the selected count, or All when none are selected.
+Organize Shortest Clips First, Organize Longest Clips First, and Shuffle affect only
+those timelines, preserving each timeline's clips and duration. Select None in this
+group clears only timeline selection. Create Timelines is the explicit action for
+redistributing sources and rebuilding the balanced arrangement.
+
+**Remove selected** removes selected sources and their timeline entries without
+removing files from disk or changing the order of remaining clips.
 Every timeline must contain a clip before rendering is enabled.
 
 **Columns** offers 3 (default) or 4, followed by **Divisions**, which defaults to 1.
 The number of timelines is Columns times Divisions. Four columns and two divisions
 produce A-D and E-H, with four plot rows and two horizontal division groups.
-Changing either setting clears the arrangement; Create Timelines or a sort button
+Changing either setting clears the arrangement; Create Timelines
 rebuilds it explicitly. Each division appears after the previous group on the same rows,
 separated by a vertical line. Timelines retain their own letter and duration.
 The source list is the only clip list.

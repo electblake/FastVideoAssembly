@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added independent multi-selection for clips and timelines, selection counts in their control groups, and timeline-local organizing and shuffling.
+- Added contiguous multi-clip moves by dragging or using Forward, Backward, Start, and End.
 - Added Replace files and continue to output-conflict dialogs, allowing replacement of the listed outputs while keeping Cancel as the default.
 - Added a Columns selector with 3 and 4 options before Divisions, including matching display rows, balanced timelines, final video widths, audio mixes, cleanup, and active-state restoration.
 - Added Copy output and Clear output beneath the Activity log, plus an unchecked Keep logs between runs option above the timeline actions.
@@ -33,6 +35,9 @@
 
 ### Fixed
 
+- Calculated drag placement after closing source gaps, with an insertion marker at the actual final block start instead of the old pre-removal boundary.
+- Kept all-timeline organizing within existing tracks instead of redistributing manually arranged clips.
+- Corrected Forward and Backward movement at timeline ends and clipped number labels to their own segments.
 - Corrected remaining three-column assumptions in the unreleased documentation for configurable layouts.
 - Identified the failed source correctly when a parallel audio measurement batch ended out of order.
 - Preserved completed columns and stopped paused exports without consuming stale FFmpeg progress.
