@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `-Minimize` to both launchers to start minimized without taking focus.
+
+### Changed
+
+- Made `-NoProfile` skip all settings and session-state reads and writes, including temporary profile files.
+- Made tests use no-profile, minimized application instances by default; kept persistence tests in isolated temporary profiles.
+
 ## [0.7.1] - 2026-10-24
 
 ### Fixed

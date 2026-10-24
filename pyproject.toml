@@ -26,3 +26,4 @@ dev = ["pytest>=8", "pytest-qt>=4.4", "ruff>=0.9"]
 
 [tool.pytest.ini_options]
 qt_api = "pyside6"
+markers = ["profile: exercise persistence using an isolated temporary user profile"]

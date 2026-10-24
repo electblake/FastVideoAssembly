@@ -19,11 +19,15 @@ uv sync --locked
 uv run fastvideoassembly
 ```
 
-Use `uv run fastvideoassembly -NoProfile` to start with default settings without
-reading or modifying your saved profile. This also works with the installed
-launcher and can be combined with video or folder paths. Settings use a fresh
-temporary INI file for each session. Programmatic callers can use
-`Application(no_profile=True)`.
+Use `uv run fastvideoassembly -NoProfile` to start with default settings and
+neither restore nor save settings or session state, including temporary profile files.
+Add `-Minimize` to start minimized without activating the window:
+`uv run fastvideoassembly -NoProfile -Minimize`. Both options also work with the
+installed launcher and may be combined with video or folder paths. Programmatic
+callers can use `Application(no_profile=True, minimize=True)`.
+
+Tests use no-profile, minimized application instances by default. Persistence tests
+use the `profile` marker and a separate temporary settings directory for each test.
 
 Use Add Videos or Ctrl+O to select videos and folders together, drop files/folders onto the source list or window, or pass paths to
 `uv run fastvideoassembly "C:\Videos"`. Imports include immediate MP4, MKV, MOV,

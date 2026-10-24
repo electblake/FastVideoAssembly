@@ -68,6 +68,7 @@ from .assembly import (
 from .audio import mix_peak_arguments, peak_measurement_arguments
 from .hardware import render_hardware
 from .preview import Preview
+from .settings import NoProfileSettings
 from .styles.timeline import TimelineClipStyle, TimelineTrackStyle
 from .three_column import ThreeColumnAssembly, TimelineSegment
 from .timeline import CLIP_HEIGHT, CLIP_Y_OFFSET, TRACK_HEIGHT, clip_spans, move_clips
@@ -100,22 +101,19 @@ class Application(QObject):
         paths=(),
         launcher_module=integrations.APP_MODULE,
         no_profile=False,
+        minimize=False,
     ):
         super().__init__()
         self.native_style = QApplication.style().objectName()
         self.ffmpeg, self.ffprobe = ffmpeg, ffprobe
         self.launcher_module = launcher_module
         if no_profile:
-            self.settings_directory = tempfile.TemporaryDirectory(prefix="FastVideoAssembly-")
-            settings_path = Path(self.settings_directory.name) / "settings.ini"
+            self.settings = NoProfileSettings()
         else:
-            settings_path = user_config_path(APP_NAME, appauthor=False) / "settings.ini"
-        self.settings = QSettings(
-            str(settings_path),
-            QSettings.Format.IniFormat,
-        )
-        if no_profile:
-            self.settings.setFallbacksEnabled(False)
+            self.settings = QSettings(
+                str(user_config_path(APP_NAME, appauthor=False) / "settings.ini"),
+                QSettings.Format.IniFormat,
+            )
         self.clips = []
         self.pending = []
         self.loading = False
@@ -176,6 +174,9 @@ class Application(QObject):
                 for path in self.settings.value("paths", type=list)
             ]
         self.settings.endArray()
+        if minimize:
+            self.window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+            self.window.setWindowState(self.window.windowState() | Qt.WindowState.WindowMinimized)
         self.refresh()
         if paths:
             self.add_paths(paths, initialize_project=not saved_sources)
@@ -1548,13 +1549,14 @@ class Application(QObject):
 
 def main():
     no_profile = "-NoProfile" in sys.argv[1:]
-    paths = [arg for arg in sys.argv[1:] if arg != "-NoProfile"]
+    minimize = "-Minimize" in sys.argv[1:]
+    paths = [arg for arg in sys.argv[1:] if arg not in ("-NoProfile", "-Minimize")]
     if paths == ["--install-explorer"]:
         return integrations.install()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_NAME)
-    controller = Application(paths=paths, no_profile=no_profile)
+    controller = Application(paths=paths, no_profile=no_profile, minimize=minimize)
     controller.window.show()
     return app.exec()

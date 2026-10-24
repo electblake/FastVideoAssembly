@@ -85,6 +85,7 @@ def test_columns_only_does_not_check_unused_final(controller, tmp_path, monkeypa
     controller.export_directory.cleanup()
 
 
+@pytest.mark.profile
 def test_output_settings_folder_default_and_direct_export(
     controller, tmp_path, monkeypatch
 ):
@@ -117,6 +118,7 @@ def test_output_settings_folder_default_and_direct_export(
     assert controller.settings.value("output/folder") == str(tmp_path)
 
 
+@pytest.mark.profile
 def test_project_from_folder_live_selection(controller, tmp_path, qtbot):
     folder = tmp_path / "Project" / "Day" / "Clips"
     folder.mkdir(parents=True)
@@ -173,6 +175,7 @@ def test_project_from_folder_tracks_first_source(controller, tmp_path):
     assert controller.project_folder_level.isEnabled()
 
 
+@pytest.mark.profile
 def test_open_output_folder_uses_current_local_path(controller, tmp_path, monkeypatch, qtbot):
     open_url = Mock(return_value=True)
     monkeypatch.setattr(app.QDesktopServices, "openUrl", open_url)
@@ -587,6 +590,7 @@ def test_excluded_source_can_be_selected_and_removed(controller, preview_source)
     assert preview_source.exists()
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("enabled,count,workers", [(True, 2, 2), (True, 4, 4), (False, 4, 1)])
 def test_parallel_source_scanning(
     controller, preview_source, tmp_path, qtbot, monkeypatch, enabled, count, workers
@@ -926,6 +930,7 @@ def test_shared_sources_are_neutral_and_tab_filters_portrait(controller, tmp_pat
     assert controller.assembler.remove_button.isEnabled()
 
 
+@pytest.mark.profile
 def test_appearance_preserves_assembly_and_uses_separate_settings(controller):
     controller.clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 4)]
     controller.rebalance()
@@ -968,6 +973,7 @@ def test_order_buttons_keep_equal_track_totals(controller):
     assert controller.assembler.tracks == original
 
 
+@pytest.mark.profile
 def test_shared_configuration_persists_and_updates_dimensions(controller, qtbot):
     controller.resolution.setCurrentIndex(1)
     controller.frame_rate.setCurrentIndex(controller.frame_rate.findData("30000/1001"))
@@ -989,6 +995,7 @@ def test_shared_configuration_persists_and_updates_dimensions(controller, qtbot)
     controller.running = False
 
 
+@pytest.mark.profile
 def test_audio_dock_modes_persistence_and_busy_state(controller, qtbot):
     assert controller.config_dock.windowTitle() == "Render Settings"
     assert controller.audio_dock.windowTitle() == "Audio Settings"
@@ -1010,6 +1017,7 @@ def test_audio_dock_modes_persistence_and_busy_state(controller, qtbot):
     controller.running = False
 
 
+@pytest.mark.profile
 def test_cpu_performance_settings_persist(controller, qtbot, monkeypatch):
     assert controller.filter_threads.value() == 4
     assert controller.analysis_workers.value() == 2
@@ -1220,7 +1228,8 @@ def test_add_dialog_accepts_mixed_files_and_folders(controller, tmp_path, qtbot)
     video.touch()
     dialog = app.VideoSourceDialog(controller.window, str(tmp_path))
     qtbot.addWidget(dialog)
-    dialog.show()
+    dialog.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    dialog.showMinimized()
     view = dialog.findChild(QListView, 'listView')
     model = view.model()
     qtbot.waitUntil(lambda: model.index(str(video)).isValid())
@@ -1363,6 +1372,7 @@ def test_import_waits_for_explicit_timeline_creation(controller, preview_source,
     controller.running = False
 
 
+@pytest.mark.profile
 def test_source_list_restores_on_restart_without_creating_timelines(controller, preview_source, tmp_path, qtbot):
     extra = tmp_path / 'extra.mp4'
     extra.hardlink_to(preview_source)
@@ -1388,6 +1398,7 @@ def test_source_list_restores_on_restart_without_creating_timelines(controller, 
     assert not empty.loading
 
 
+@pytest.mark.profile
 def test_source_changes_persist_without_closing(controller, preview_source, tmp_path, qtbot):
     from PySide6.QtCore import QSettings
 
@@ -1406,6 +1417,7 @@ def test_source_changes_persist_without_closing(controller, preview_source, tmp_
     assert saved.value('sources/paths', type=list) == []
 
 
+@pytest.mark.profile
 def test_scanned_sources_restore_and_only_scan_remaining(controller, preview_source, tmp_path, qtbot, monkeypatch):
     from fastvideoassembly.assembly import Source
 
@@ -1450,6 +1462,7 @@ def test_scanned_sources_restore_and_only_scan_remaining(controller, preview_sou
     empty.settings.endArray()
 
 
+@pytest.mark.profile
 def test_render_settings_use_typed_ini_values(controller, qtbot):
     controller.encoder.setCurrentIndex(controller.encoder.findData("libx264"))
     controller.quality.setValue(17)
@@ -1465,6 +1478,7 @@ def test_render_settings_use_typed_ini_values(controller, qtbot):
     assert Path(restored.settings.fileName()).suffix == ".ini"
 
 
+@pytest.mark.profile
 def test_hardware_render_settings_persist_and_control_scaling_options(controller, qtbot, monkeypatch):
     monkeypatch.setattr(app, "render_hardware", lambda ffmpeg: (
         [("CPU", "none"), ("NVIDIA NVDEC", "cuda"), ("Intel Quick Sync", "qsv")],
@@ -1495,6 +1509,7 @@ def test_hardware_render_settings_persist_and_control_scaling_options(controller
     assert restored.render_config().qsv_scaling_mode == "low_power"
 
 
+@pytest.mark.profile
 def test_unavailable_saved_hardware_remains_selected_until_user_changes_it(controller, qtbot, monkeypatch):
     controller.settings.setValue("render/decoder", "cuda")
     controller.settings.setValue("render/scaler", "qsv")
@@ -1518,6 +1533,7 @@ def test_unavailable_saved_hardware_remains_selected_until_user_changes_it(contr
     assert restored.render_config().scaler == "cpu"
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("exit_action", [False, True])
 def test_close_flushes_latest_active_state_before_window_closes(controller, tmp_path, qtbot, monkeypatch, exit_action):
     clips = [Clip(tmp_path / f"latest{i}.mp4", i + 1, 60, 120, True) for i in range(4)]
@@ -1551,6 +1567,7 @@ def test_close_flushes_latest_active_state_before_window_closes(controller, tmp_
     assert restored.settings.value("mainWindow/state") == controller.window.saveState(1)
 
 
+@pytest.mark.profile
 def test_active_timeline_order_restores_after_each_edit(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, "set_clip", Mock())
     controller.clips = [Clip(tmp_path / f"order{i}.mp4", i + 1, 60, 120, True) for i in range(6)]
@@ -1591,6 +1608,7 @@ def test_active_timeline_order_restores_after_each_edit(controller, tmp_path, qt
     assert empty.assembler.tracks == [[] for _ in range(6)]
 
 
+@pytest.mark.profile
 def test_interrupted_restore_retains_complete_saved_queue(controller, preview_source, tmp_path, qtbot, monkeypatch):
     second = tmp_path / 'second.mp4'
     second.hardlink_to(preview_source)
@@ -1608,6 +1626,7 @@ def test_interrupted_restore_retains_complete_saved_queue(controller, preview_so
     restored.loading = False
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize('normalization', ['None', 'True Peak', 'YouTube'])
 @pytest.mark.parametrize('combine', [False, True])
 def test_no_audio_omits_streams_and_measurements(controller, preview_source, tmp_path, qtbot, monkeypatch, normalization, combine):
@@ -1635,6 +1654,7 @@ def test_no_audio_omits_streams_and_measurements(controller, preview_source, tmp
     assert controller.normalization.currentText() == normalization
 
 
+@pytest.mark.profile
 def test_clear_all_sources_button(controller, preview_source, qtbot):
     assert not controller.clear_sources_button.isEnabled()
     controller.add_paths([preview_source])
@@ -1665,6 +1685,7 @@ def test_clear_all_sources_button(controller, preview_source, qtbot):
     assert preview_source.exists()
 
 
+@pytest.mark.profile
 def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtbot):
     controller.normalization.setCurrentText('True Peak')
     controller.audio_codec.setCurrentText('No Audio')
@@ -1684,6 +1705,7 @@ def test_no_audio_restores_and_remains_disabled_after_busy_state(controller, qtb
     assert restored.normalization.currentText() == 'True Peak'
 
 
+@pytest.mark.profile
 def test_final_checkbox_placement_and_busy_lock(controller):
     assert controller.combine.text() == 'Create final assembly'
     layout = controller.assembler.layout()
@@ -1703,6 +1725,7 @@ def test_final_checkbox_placement_and_busy_lock(controller):
     assert controller.combine.isEnabled()
 
 
+@pytest.mark.profile
 def test_final_checkbox_preserves_editor_and_restores_setting(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, 'set_clip', Mock())
     clips = [Clip(tmp_path / f'{i}.mp4', 10, 60, 120) for i in range(6)]
@@ -1732,6 +1755,7 @@ def test_final_checkbox_preserves_editor_and_restores_setting(controller, tmp_pa
     restored.loading = False
 
 
+@pytest.mark.profile
 def test_filename_only_add_and_restore_do_not_start_probe(controller, tmp_path, qtbot, monkeypatch):
     from fastvideoassembly.assembly import Source
 
@@ -1757,6 +1781,7 @@ def test_filename_only_add_and_restore_do_not_start_probe(controller, tmp_path, 
     assert restored.assembler.tracks == [[], [], []]
 
 
+@pytest.mark.profile
 def test_divisions_balance_display_selection_and_settings(controller, tmp_path, qtbot, monkeypatch):
     from PySide6.QtWidgets import QListWidget
 
@@ -1852,6 +1877,7 @@ def test_two_divisions_render_independent_triples(controller, preview_source, tm
     assert controller.assembler.columns.isEnabled()
 
 
+@pytest.mark.profile
 def test_four_columns_layout_and_persistence(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, "set_clip", Mock())
     assert [controller.assembler.columns.itemText(i) for i in range(controller.assembler.columns.count())] == ["3", "4"]
@@ -1898,6 +1924,7 @@ def test_collision_in_later_division_blocks_entire_export(controller, tmp_path, 
     assert str(existing) in error.call_args.args[0].text()
 
 
+@pytest.mark.profile
 def test_remove_timelines_default_persistence_and_enabled_state(controller, qtbot):
     option = controller.assembler.remove_timelines
     assert not option.isChecked()
@@ -1973,6 +2000,7 @@ def test_columns_only_never_schedules_output_cleanup(controller, tmp_path, monke
     controller.export_directory.cleanup()
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("columns", [3, 4])
 @pytest.mark.parametrize("division", [0, 1])
 @pytest.mark.parametrize("source, drop, expected", [
@@ -2145,6 +2173,7 @@ def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns
     assert controller.assembler.longest_button.text() == "Longest First"
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("action, expected", [
     (-1, [1, 2, 4, 0, 3]), (1, [0, 3, 1, 2, 4]),
     ("start", [1, 2, 4, 0, 3]), ("end", [0, 3, 1, 2, 4]),
@@ -2185,6 +2214,7 @@ def test_move_multiple_selected_clips(controller, tmp_path, qtbot, action, expec
     assert restored.assembler.tracks == controller.assembler.tracks
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("columns", [3, 4])
 @pytest.mark.parametrize("drop, expected", [(0.1, [0, 1, 3, 2, 4]), (2.1, [0, 2, 4, 1, 3]), (4.9, [0, 2, 4, 1, 3])])
 def test_drag_disjoint_selected_clips_as_block(controller, tmp_path, qtbot, columns, drop, expected):
@@ -2238,6 +2268,7 @@ def test_clip_move_directions_at_timeline_ends(controller, tmp_path, index):
     assert backward.isEnabled()
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("columns", [3, 4])
 @pytest.mark.parametrize("selection", [set(), {0}, {0, 2}])
 def test_shuffle_within_target_timelines(controller, tmp_path, qtbot, monkeypatch, columns, selection):
@@ -2330,6 +2361,7 @@ def test_organize_all_never_redistributes_manual_timelines(controller, tmp_path)
     assert controller.assembler.clips_group.title() == "Clips (0)"
 
 
+@pytest.mark.profile
 def test_interim_checkbox_persistence_and_output_selection(controller, tmp_path, qtbot):
     from fastvideoassembly.app import Application
 
@@ -2390,6 +2422,7 @@ def test_direct_division_preserves_existing_interims(controller, preview_source,
     assert float(data["format"]["duration"]) == pytest.approx(1.2, abs=0.06)
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("interims", [False, True])
 def test_normalization_cache_survives_restart(controller, preview_source, tmp_path, qtbot, monkeypatch, interims):
     clip = Clip(preview_source, 0.5, 60, 120, True)
@@ -2417,6 +2450,7 @@ def test_normalization_cache_survives_restart(controller, preview_source, tmp_pa
     assert list(restored.measurement_keys.values()) == [tmp_path / "edited_FINAL.mp4"]
 
 
+@pytest.mark.profile
 def test_manual_normalization_and_source_change(controller, preview_source, tmp_path, qtbot):
     clip = Clip(preview_source, 0.5, 60, 120, True)
     controller.clips = [clip]
@@ -2439,6 +2473,7 @@ def test_manual_normalization_and_source_change(controller, preview_source, tmp_
     assert not controller.normalize_button.isEnabled()
 
 
+@pytest.mark.profile
 @pytest.mark.parametrize("outcome", ["success", "stop", "failure"])
 def test_manual_normalization_preserves_cache_until_success(controller, preview_source, qtbot, monkeypatch, outcome):
     import json
