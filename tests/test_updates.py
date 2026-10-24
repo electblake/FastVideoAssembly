@@ -34,7 +34,32 @@ def test_release_comparison(dialog, monkeypatch, qtbot, version, available):
     qtbot.waitUntil(lambda: not dialog.timer.isActive())
     assert dialog.download_button.isEnabled() == available
     assert not dialog.install_button.isEnabled()
+    assert dialog.check_button.isEnabled()
     assert dialog.status.text() == (f"Version {version} available" if available else "Up to date")
+
+
+def test_recheck_clears_previous_release_and_download(dialog, monkeypatch, tmp_path, qtbot):
+    monkeypatch.setattr(updates, "APP_VERSION", "0.5.0")
+    release = {"tag_name": "v0.6.0", "assets": [{"name": "FastVideoAssembly-0.6.0-windows-amd64-Setup.exe"}]}
+    monkeypatch.setattr(updates, "latest_release", lambda: release)
+    dialog.check_button.click()
+    qtbot.waitUntil(lambda: not dialog.timer.isActive())
+    assert dialog.download_button.isEnabled()
+    dialog.installer = tmp_path / "old-Setup.exe"
+    dialog.install_button.setEnabled(True)
+    dialog.progress.setValue(100)
+    release = {"tag_name": "v0.5.0", "assets": []}
+    dialog.check_button.click()
+    assert not dialog.check_button.isEnabled()
+    assert not dialog.download_button.isEnabled()
+    assert not dialog.install_button.isEnabled()
+    assert dialog.installer is None
+    assert dialog.progress.value() == 0
+    qtbot.waitUntil(lambda: not dialog.timer.isActive())
+    assert dialog.status.text() == "Up to date"
+    assert dialog.check_button.isEnabled()
+    assert not dialog.download_button.isEnabled()
+    assert not dialog.install_button.isEnabled()
 
 
 def test_failed_check_surfaces_original_failure(dialog):
@@ -100,9 +125,11 @@ def test_download_enables_install_only_after_completion(dialog, monkeypatch, tmp
     dialog.download()
     qtbot.waitUntil(lambda: dialog.progress.value() == 50)
     assert not dialog.install_button.isEnabled()
+    assert not dialog.check_button.isEnabled()
     done.set()
     qtbot.waitUntil(lambda: dialog.install_button.isEnabled())
     assert dialog.progress.value() == 100
+    assert dialog.check_button.isEnabled()
     helper = Mock()
     monkeypatch.setattr(updates, "install_after_exit", helper)
     dialog.cancel_button.click()

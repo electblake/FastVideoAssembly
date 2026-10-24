@@ -133,6 +133,10 @@ class UpdateDialog(QDialog):
 
     def check(self):
         self.check_button.setEnabled(False)
+        self.download_button.setEnabled(False)
+        self.install_button.setEnabled(False)
+        self.installer = None
+        self.progress.setValue(0)
         self.status.setText("Checking...")
         self.operation = "check"
         self.future = self.executor.submit(latest_release)
@@ -159,8 +163,10 @@ class UpdateDialog(QDialog):
             self.progress.setValue(100)
             self.status.setText("Download complete")
             self.install_button.setEnabled(True)
+        self.check_button.setEnabled(True)
 
     def download(self):
+        self.check_button.setEnabled(False)
         self.download_button.setEnabled(False)
         self.status.setText("Downloading...")
         cache = user_cache_path(APP_NAME, appauthor=False) / "updates"

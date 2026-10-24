@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-24
+
 ### Added
 
 - Added a saved Render interim timelines checkbox above timeline deletion, enabled by default to preserve existing exports.
@@ -12,6 +14,11 @@
 
 - Disabled timeline deletion when interim rendering is off and excluded unused interim paths from overwrite checks.
 - Disabled Render when neither interim timelines nor final assembly output is selected.
+
+### Fixed
+
+- Re-enabled Check for updates after completed checks and downloads without reopening the dialog.
+- Cleared stale installer readiness and download progress when checking again, and disabled checks during downloads.
 
 ## [0.5.0] - 2026-10-24
 
