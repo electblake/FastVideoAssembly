@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+
+- Saved True Peak source and final-mix measurements with the project and reused them across exports and restarts.
+- Added Normalize Audio to manually remeasure scanned sources without rendering video.
+- Added regression coverage for restart reuse, changed files and timelines, audio settings, silent audio, and interrupted normalization.
+
+### Changed
+
+- Invalidated cached measurements when source file size, modification time, duration, timeline arrangement, or relevant audio rendering settings changed.
+- Retained dynamic YouTube loudness processing during rendering.
+
+### Fixed
+
+- Preserved saved source and mix measurements when manual normalization stopped or failed before a successful replacement.
+- Invalidated saved mixes after successful manual source remeasurement.
+
 ## [0.6.0] - 2026-10-24
 
 ### Added

@@ -133,7 +133,7 @@ timelines, and the final assembly. Audio measurement, normalization, and mixing
 are skipped in this mode.
 
 The dockable **Audio Settings** panel sits below Render Settings. Its
-**Normalize Audio** selector saves one of:
+**Normalization** selector saves one of:
 
 - **None:** leave source levels unchanged; the final equal-weight mix remains.
 - **True Peak:** measure each source's stereo audio before rendering and apply
@@ -144,7 +144,11 @@ The dockable **Audio Settings** panel sits below Render Settings. Its
   to 50 LU to avoid imposing an additional narrow loudness-range target.
 
 True Peak measurements use the same resampling, stereo conversion and duration
-as rendering, and are reused when the same source appears more than once.
+as rendering. Measurements are saved with the project and reused across exports
+and restarts. Changed source files are measured again; changing the timeline or
+audio rendering settings invalidates the final mix measurement. **Normalize Audio**
+remeasures all scanned audio sources in True Peak mode and clears saved mix results.
+YouTube mode retains dynamic loudness processing during each render.
 **Audio analysis workers** sets the maximum concurrent True Peak measurements
 before each column render (default 2). Measurements run in bounded batches;
 pause takes effect after the active batch, and stop signals all active workers.

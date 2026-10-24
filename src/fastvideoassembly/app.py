@@ -139,7 +139,9 @@ class Application(QObject):
         self.process.readyReadStandardOutput.connect(self.read_progress)
         self.process.readyReadStandardError.connect(self.read_log)
         self.process.finished.connect(self.finished)
+        self.normalizing_audio = False
         self.measurement_processes = {}
+        self.normalization_cache = json.loads(self.settings.value("audio/measurements", "{}"))
         self.replace_outputs = set()
         self.runtime_timer = QTimer(self.window)
         self.runtime_timer.setInterval(1000)
@@ -466,7 +468,11 @@ class Application(QObject):
         self.normalization.setCurrentText(
             self.settings.value("audio/normalization", "None")
         )
-        codec_form.addRow("Normalize Audio", self.normalization)
+        codec_form.addRow("Normalization", self.normalization)
+        self.normalize_button = QPushButton("Normalize Audio")
+        self.normalize_button.setToolTip("Remeasure True Peak adjustments for scanned sources.")
+        self.normalize_button.clicked.connect(self.normalize_audio)
+        codec_form.addRow(self.normalize_button)
         self.analysis_workers = QSpinBox()
         self.analysis_workers.setRange(1, 32)
         self.analysis_workers.setValue(self.settings.value("audio/analysis_workers", 2, type=int))
@@ -581,6 +587,11 @@ class Application(QObject):
     def audio_settings_changed(self):
         self.normalization.setEnabled(self.audio_codec.currentData() != "none")
         mode = self.normalization.currentText()
+        self.normalize_button.setEnabled(
+            not self.loading and not self.running
+            and self.audio_codec.currentData() != "none" and mode == "True Peak"
+            and any(isinstance(clip, Clip) and clip.has_audio for clip in self.clips)
+        )
         self.analysis_workers.setEnabled(self.audio_codec.currentData() != "none" and mode == "True Peak")
         self.settings.setValue("audio/analysis_workers", self.analysis_workers.value())
         self.settings.setValue("audio/normalization", mode)
@@ -698,6 +709,7 @@ class Application(QObject):
             self.settings.setArrayIndex(index)
             self.settings.setValue("paths", [str(clip.path) for clip in track])
         self.settings.endArray()
+        self.settings.setValue("audio/measurements", json.dumps(self.normalization_cache))
         self.settings.sync()
 
     def create_timelines(self):
@@ -1062,6 +1074,11 @@ class Application(QObject):
         self.assembler.remove_timelines.setEnabled(idle and self.combine.isChecked()
                                                   and self.assembler.render_timelines.isChecked())
         self.audio_panel.setEnabled(idle)
+        self.normalize_button.setEnabled(
+            idle and self.audio_codec.currentData() != "none"
+            and self.normalization.currentText() == "True Peak"
+            and any(isinstance(clip, Clip) and clip.has_audio for clip in self.clips)
+        )
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
         removable = idle and bool(self.library.selectedItems())
@@ -1096,7 +1113,40 @@ class Application(QObject):
         )
         self.start_export(Path(self.output_folder.text()) / filename)
 
+    def source_audio_key(self, clip):
+        stat = clip.path.stat()
+        return [str(clip.path.resolve()), stat.st_size, stat.st_mtime_ns, clip.duration]
+
+    def normalize_audio(self):
+        self.export_directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-")
+        self.export_jobs = []
+        self.measurement_keys = {}
+        self.measurement_cache_keys = {}
+        self.audio_peaks = {}
+        self.column_cleanup = {}
+        self.replace_outputs = set()
+        self.normalizing_audio = True
+        for clip in self.clips:
+            if isinstance(clip, Clip) and clip.has_audio:
+                index = len(self.export_jobs)
+                self.measurement_keys[index] = clip.path
+                self.measurement_cache_keys[index] = json.dumps(["source-v1", self.source_audio_key(clip)])
+                self.export_jobs.append((clip.path, clip.duration, peak_measurement_arguments(clip)))
+        self.export_groups = [("Normalize Audio", 0, len(self.export_jobs))]
+        self.export_index = 0
+        self.stop_requested = False
+        self.render_paused = False
+        self.render_waiting = False
+        self.progress.setValue(0)
+        if not self.assembler.keep_logs.isChecked():
+            self.log.clear()
+        self.log_dock.show()
+        self.running = True
+        self.update_enabled()
+        self.start_export_job()
+
     def start_export(self, output):
+        self.normalizing_audio = False
         count = len(self.assembler.tracks)
         columns_per_division = self.assembler.columns.currentData()
         columns = [output.with_name(f"{output.stem}_{timeline_name(index)}.mp4") for index in range(count)]
@@ -1133,6 +1183,7 @@ class Application(QObject):
         self.export_jobs = []
         self.export_groups = []
         self.measurement_keys = {}
+        self.measurement_cache_keys = {}
         self.audio_peaks = {}
         durations = [
             sum(clip_duration(clip, config) for clip in track)
@@ -1153,11 +1204,16 @@ class Application(QObject):
                         and clip.has_audio
                         and clip.path not in scheduled_measurements
                     ):
+                        cache_key = json.dumps(["source-v1", self.source_audio_key(clip)])
+                        scheduled_measurements.add(clip.path)
+                        if cache_key in self.normalization_cache:
+                            self.audio_peaks[clip.path] = float(self.normalization_cache[cache_key])
+                            continue
+                        self.measurement_cache_keys[len(self.export_jobs)] = cache_key
                         self.measurement_keys[len(self.export_jobs)] = clip.path
                         self.export_jobs.append(
                             (clip.path, clip.duration, peak_measurement_arguments(clip))
                         )
-                        scheduled_measurements.add(clip.path)
                 if render_timelines:
                     self.column_cleanup[len(self.export_jobs)] = [graph_path]
                     self.export_jobs.append((
@@ -1173,17 +1229,26 @@ class Application(QObject):
                 group_tracks = self.assembler.tracks[division_start:division_start + columns_per_division]
                 graph_path = graph_root / f"composition{division_start // columns_per_division}.ffgraph"
                 if config.audio_codec != "none" and config.normalization == "True Peak":
-                    self.measurement_keys[len(self.export_jobs)] = output
-                    self.export_jobs.append(
-                        (
-                            output,
-                            duration,
-                            mix_peak_arguments(group_columns, duration) if render_timelines else partial(
-                                division_arguments, group_tracks, duration, output,
-                                graph_root / f"mix{division_start}.ffgraph", config, self.audio_peaks, measure=True,
-                            ),
+                    cache_key = json.dumps([
+                        "mix-v1", render_timelines, config.audio_codec, config.fps,
+                        [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config)]
+                          for clip in track] for track in group_tracks],
+                    ])
+                    if cache_key in self.normalization_cache:
+                        self.audio_peaks[output] = float(self.normalization_cache[cache_key])
+                    else:
+                        self.measurement_cache_keys[len(self.export_jobs)] = cache_key
+                        self.measurement_keys[len(self.export_jobs)] = output
+                        self.export_jobs.append(
+                            (
+                                output,
+                                duration,
+                                mix_peak_arguments(group_columns, duration) if render_timelines else partial(
+                                    division_arguments, group_tracks, duration, output,
+                                    graph_root / f"mix{division_start}.ffgraph", config, self.audio_peaks, measure=True,
+                                ),
+                            )
                         )
-                    )
                 if render_timelines:
                     args = partial(composition_arguments, group_columns, duration, output, graph_path, config)
                 else:
@@ -1287,6 +1352,13 @@ class Application(QObject):
         if exit_code == 0 and not self.stop_requested:
             measured = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
             self.audio_peaks[self.measurement_keys[index]] = float(measured["input_tp"])
+            if self.normalizing_audio:
+                self.normalization_cache = {
+                    key: value for key, value in self.normalization_cache.items()
+                    if json.loads(key)[0] != "mix-v1"
+                }
+            self.normalization_cache[self.measurement_cache_keys[index]] = measured["input_tp"]
+            self.save_active_state()
             self.measurement_seconds[index] = self.export_jobs[index][1]
             self.audio_items_processed += 1
             self.update_runtime()

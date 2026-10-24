@@ -343,6 +343,8 @@ def test_true_peak_measurements_precede_single_timeline_render(
     controller.normalization.setCurrentText("True Peak")
     controller.combine.setChecked(False)
     clips = [Clip(tmp_path / f"source{i}.mp4", 1, 90, 160, True) for i in range(4)]
+    for clip in clips:
+        clip.path.touch()
     controller.assembler.tracks = [
         [clips[0], clips[1]],
         [clips[2]],
@@ -408,6 +410,7 @@ def test_column_a_is_saved_and_cleaned_before_b_failure(
         [Clip(tmp_path / "missing.mp4", 3, 60, 120, True)],
         [clip],
     ]
+    (tmp_path / "missing.mp4").touch()
     output = tmp_path / "incremental.mp4"
     started_b = []
     start_job = controller.start_export_job
@@ -1053,6 +1056,8 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
         [Clip(tmp_path / "0.mp4", 1, 60, 120, True)],
         [Clip(tmp_path / "1.mp4", 1, 60, 120, True)],
     ]
+    for i in range(3):
+        (tmp_path / f"{i}.mp4").touch()
     workers = [Mock(), Mock(), Mock()]
     for worker in workers:
         worker.readAllStandardOutput.return_value = b""
@@ -2339,3 +2344,113 @@ def test_direct_division_preserves_existing_interims(controller, preview_source,
     ], capture_output=True, text=True, check=True).stdout)
     assert [stream["codec_type"] for stream in data["streams"]] == ["video", "audio"]
     assert float(data["format"]["duration"]) == pytest.approx(1.2, abs=0.06)
+
+
+@pytest.mark.parametrize("interims", [False, True])
+def test_normalization_cache_survives_restart(controller, preview_source, tmp_path, qtbot, monkeypatch, interims):
+    clip = Clip(preview_source, 0.5, 60, 120, True)
+    controller.clips = [clip]
+    controller.assembler.tracks = [[clip], [clip], [clip]]
+    controller.assembler.render_timelines.setChecked(interims)
+    controller.normalization.setCurrentText("True Peak")
+    config = RenderConfig(column_width=60, height=120, encoder="libx264", normalization="True Peak")
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+    controller.start_export(tmp_path / "first.mp4")
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert len(controller.normalization_cache) == 2
+    peaks = dict(controller.audio_peaks)
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    monkeypatch.setattr(restored, "render_config", lambda: config)
+    restored.start_export(tmp_path / "second.mp4")
+    qtbot.waitUntil(lambda: not restored.running, timeout=30000)
+    assert restored.measurement_keys == {}
+    assert restored.audio_peaks[preview_source] == peaks[preview_source]
+    assert (tmp_path / "second_FINAL.mp4").exists()
+    restored.assembler.tracks[0].append(clip)
+    restored.start_export(tmp_path / "edited.mp4")
+    qtbot.waitUntil(lambda: not restored.running, timeout=30000)
+    assert list(restored.measurement_keys.values()) == [tmp_path / "edited_FINAL.mp4"]
+
+
+def test_manual_normalization_and_source_change(controller, preview_source, tmp_path, qtbot):
+    clip = Clip(preview_source, 0.5, 60, 120, True)
+    controller.clips = [clip]
+    controller.normalization.setCurrentText("True Peak")
+    controller.update_enabled()
+    assert controller.normalize_button.isEnabled()
+    controller.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert len(controller.normalization_cache) == 1
+    original_key = controller.source_audio_key(clip)
+    controller.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert list(controller.measurement_keys.values()) == [preview_source]
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert restored.normalization_cache == controller.normalization_cache
+    preview_source.touch()
+    assert restored.source_audio_key(clip) != original_key
+    controller.audio_codec.setCurrentIndex(controller.audio_codec.findData("none"))
+    assert not controller.normalize_button.isEnabled()
+
+
+@pytest.mark.parametrize("outcome", ["success", "stop", "failure"])
+def test_manual_normalization_preserves_cache_until_success(controller, preview_source, qtbot, monkeypatch, outcome):
+    import json
+
+    clip = Clip(preview_source, 0.5, 60, 120, True)
+    controller.clips = [clip]
+    controller.normalization.setCurrentText("True Peak")
+    source_key = json.dumps(["source-v1", controller.source_audio_key(clip)])
+    mix_key = json.dumps(["mix-v1", "previous mix"])
+    controller.normalization_cache = {source_key: "-6.0", mix_key: "-8.0"}
+    controller.save_active_state()
+    worker = Mock()
+    worker.readAllStandardOutput.return_value = b""
+    worker.readAllStandardError.return_value = b'{"input_tp": "-inf"}'
+    monkeypatch.setattr(app, "QProcess", Mock(return_value=worker))
+    controller.normalize_audio()
+    assert controller.normalization_cache == {source_key: "-6.0", mix_key: "-8.0"}
+    if outcome == "stop":
+        controller.stop_export()
+    controller.measurement_finished(worker, 1 if outcome == "failure" else 0, None)
+    assert not controller.running
+    expected = {source_key: "-inf"} if outcome == "success" else {source_key: "-6.0", mix_key: "-8.0"}
+    assert controller.normalization_cache == expected
+    assert json.loads(controller.settings.value("audio/measurements")) == expected
+
+
+@pytest.mark.parametrize("change", ["unchanged", "file", "codec", "fps", "duration"])
+def test_normalization_cache_invalidation(controller, preview_source, tmp_path, qtbot, monkeypatch, change):
+    import os
+    from dataclasses import replace
+
+    clip = Clip(preview_source, 0.5, 60, 120, True)
+    controller.clips = [clip]
+    controller.assembler.tracks = [[clip], [clip], [clip]]
+    controller.assembler.render_timelines.setChecked(False)
+    config = RenderConfig(column_width=60, height=120, encoder="libx264", normalization="True Peak")
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+    controller.start_export(tmp_path / "first.mp4")
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert len(controller.normalization_cache) == 2
+    if change == "file":
+        stat = preview_source.stat()
+        os.utime(preview_source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    elif change == "codec":
+        config = replace(config, audio_codec="ac3")
+    elif change == "fps":
+        config = replace(config, fps="60")
+    elif change == "duration":
+        clip = replace(clip, duration=0.7)
+        controller.assembler.tracks = [[clip], [clip], [clip]]
+    monkeypatch.setattr(controller, "start_export_job", Mock())
+    controller.start_export(tmp_path / "second.mp4")
+    expected = [] if change == "unchanged" else [tmp_path / "second_FINAL.mp4"]
+    if change in ("file", "duration"):
+        expected.insert(0, preview_source)
+    assert list(controller.measurement_keys.values()) == expected
+    controller.running = False
+    controller.export_directory.cleanup()
+    controller.export_directory = None
