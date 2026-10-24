@@ -2,11 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Open Output Folder beneath the output folder controls to open the selected location in the system file manager.
+- Added an opt-in Remove timelines after FINAL setting that deletes only a division's three rendered timeline files after its final cut finishes successfully.
+- Added Divisions to balance 3 × N lettered timelines across all sources, display each triple side by side on three rows, and render a separate final cut per division.
+
 ### Changed
 
+- Deferred metadata scanning until Create Timelines; adding, dropping, and restoring sources now loads filenames only and remains available for repeated drops.
 - Moved Create Final 3 Column Assembly Cut above the render buttons; disabling it exports only A/B/C timelines.
 - Removed the redundant Output Length label below the timeline controls.
 - Labeled columns A, B, and C and replaced middle-dot separators throughout the application with dashes.
+
+### Removed
+
+- Removed the three duplicate timeline clip lists; source selection and timeline clicks now drive preview, movement, and removal directly.
 
 ### Fixed
 

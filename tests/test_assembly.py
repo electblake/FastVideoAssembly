@@ -382,6 +382,7 @@ def test_gui_import_and_full_resolution_export(
     assert len(controller.clips) == 4
     assert not controller.assembler.export_button.isEnabled()
     controller.assembler.create_button.click()
+    qtbot.waitUntil(lambda: not controller.loading, timeout=30000)
     assert controller.assembler.export_button.isEnabled()
     output = tmp_path / "gui-output.mp4"
     controller.start_export(output)
@@ -577,3 +578,12 @@ def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mo
         window = samples[round(start * 48000) : round((start + 0.1) * 48000)]
         rms = np.sqrt(np.mean(window**2))
         assert rms > 0.01 if audible else rms < 0.001
+
+
+@pytest.mark.parametrize('track_count', [6, 9, 27])
+def test_balancing_many_timelines_keeps_each_source_once(track_count):
+    clips = [Clip(Path(f'{i}.mp4'), 1, 60, 120) for i in range(track_count * 2)]
+    tracks = balance(clips, track_count=track_count)
+    assert len(tracks) == track_count
+    assert all(len(track) == 2 for track in tracks)
+    assert {clip for track in tracks for clip in track} == set(clips)

@@ -19,7 +19,8 @@ AVI and WebM files, without recursion or duplicates. Importing adds to the
 library without changing timelines. Click Create Timelines to build the arrangement;
 Shortest First and Longest First explicitly rebuild and sort it. Clear assembly starts over.
 The source list is saved when changed, alongside window state on close, and restored on the next launch.
-Restoring sources reads their metadata again without creating timelines.
+Adding, dropping, and restoring sources loads filenames only. Create Timelines scans
+unscanned sources before building the arrangement. Sorting is enabled once all sources are scanned.
 
 The shared source library lists filenames without assembler-specific labels or
 filtering. The **3 Column Assembly** central tab accepts display aspect ratios
@@ -35,20 +36,27 @@ the log inside the shared Process log dock, which opens when processing starts.
 The central timeline uses a shared seconds axis and duration-scaled blocks,
 including the same output-frame rounding used by rendering.
 Click a block or list entry to select it. Move earlier/later changes playback
-order; move left/right transfers the clip to the end of an adjacent column.
+order; move previous/next transfers the clip to the end of an adjacent timeline,
+including across division boundaries.
 **Shortest First** sorts clips by ascending duration; **Longest First** sorts
 by descending duration. Both buttons first redistribute all eligible source clips
-to keep the three column totals similar; ordering does not change those totals.
+to keep all timeline totals similar; ordering does not change those totals.
 The former Balanced ordering has been removed because alternating duration ranks
 did not distribute clip lengths evenly over playback time.
-Double-click a clip to open its source.
-Selecting a source, central column-list entry, or timeline segment shares one
-selection across these views. The dockable **Preview** above Render Settings
+Selecting a source or timeline segment shares one selection across both views.
+The dockable **Preview** above Render Settings
 shows the selected source with Play/Pause, Stop, and a scrubber.
 **Remove Selected Clip** removes the source and its timeline entries from the
 assembly without deleting the file or reordering other clips. Use either sorting
 button when you want to redistribute the remaining clips.
-All three columns must contain a clip before rendering is enabled.
+Every timeline must contain a clip before rendering is enabled.
+
+**Divisions** beside the final-cut checkbox defaults to 1. Set it to 2 for six
+balanced timelines (A–F), 3 for nine (A–I), and so on. Changing this setting clears
+the arrangement; Create Timelines or a sort button rebuilds it explicitly.
+Each group of three appears after the previous group on the same three plot rows,
+separated by a vertical line. Timelines retain their own letter and duration.
+The source list is the only clip list.
 
 The **Render Settings** dock controls output dimensions (1080p or
 2160p), frame rate, encoder, speed preset and quality. View can reopen the dock;
@@ -105,6 +113,14 @@ For example, project `Holiday` on 2026-10-23 produces
 then `Holiday.Assembly.2026-10-23_FINAL.mp4` when combining is enabled. These playable
 column cuts retain their natural durations and stay beside the final output.
 Uncheck **Create Final 3 Column Assembly Cut**, above the render buttons, to produce only these files.
+With multiple divisions, timelines continue as `_D`, `_E`, `_F`, etc. Each triple
+has its own combined output: `_FINAL_ABC`, `_FINAL_DEF`, and so on. A single
+division retains `_FINAL`. Each triple and its optional final finish before the
+next triple starts; all target filenames are checked before rendering begins.
+**Remove timelines after FINAL** is off by default. When enabled, each completed
+final deletes only its own three rendered timeline files. Failed or stopped finals
+retain their timeline files. Source videos are never deleted. The option is disabled
+when final creation is unchecked.
 When checked, a final pass stacks the columns, inheriting the render settings
 without resizing. Shorter columns hold their last frame. This final stage is
 another encode, not stream copy. There is no automatic reuse of prior outputs.
@@ -131,8 +147,8 @@ audio starts and silent gaps. Each temporary clip has matching audio/video
 boundaries so timing differences do not accumulate across the column.
 
 Settings → Appearance offers the same qt-themes palettes and icon variants as
-FastVideoCropper. QSettings stores preferences, geometry, dock positions and
-splitter sizes in platformdirs' FastVideoAssembly `settings.ini`. Clip ordering
+FastVideoCropper. QSettings stores preferences, Divisions, geometry, and dock positions
+in platformdirs' FastVideoAssembly `settings.ini`. Clip ordering
 is session-only. Help → Install in File Explorer registers separate per-user
 FastVideoAssembly menu entries.
 

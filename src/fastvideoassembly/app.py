@@ -45,16 +45,19 @@ from PySide6.QtWidgets import (
 
 from . import APP_NAME, APP_VERSION, integrations
 from .assembly import (
+    Clip,
     RenderConfig,
+    Source,
     clip_duration,
     clip_from_probe,
     column_jobs,
     composition_arguments,
+    timeline_name,
     video_paths,
 )
 from .audio import mix_peak_arguments, peak_measurement_arguments
 from .preview import Preview
-from .three_column import COLUMN_NAMES, ThreeColumnAssembly
+from .three_column import ThreeColumnAssembly
 
 
 def timestamp(seconds):
@@ -95,6 +98,10 @@ class Application(QObject):
         self.pending = []
         self.loading = False
         self.running = False
+        self.scanning_paused = False
+        self.scan_stop_requested = False
+        self.render_paused = False
+        self.render_waiting = False
         self.selected_clip = None
         self.output = None
         self.export_directory = None
@@ -104,7 +111,9 @@ class Application(QObject):
         self.window.setAcceptDrops(True)
         self.window.installEventFilter(self)
         self.probe = QProcess(self)
-        self.probe.finished.connect(self.probed)
+        self.probe.finished.connect(partial(self.probed, self.probe))
+        self.probes = [self.probe]
+        self.probing_paths = {}
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.read_progress)
         self.process.readyReadStandardError.connect(self.read_log)
@@ -115,10 +124,6 @@ class Application(QObject):
             self.window.restoreGeometry(self.settings.value("mainWindow/geometry"))
         if self.settings.contains("mainWindow/state"):
             self.window.restoreState(self.settings.value("mainWindow/state"), 1)
-        if self.settings.contains("mainWindow/splitterState"):
-            self.assembler.splitter.restoreState(
-                self.settings.value("mainWindow/splitterState")
-            )
         self.refresh()
         saved_sources = self.settings.value("sources/paths", [], type=list)
         if saved_sources or paths:
@@ -171,6 +176,8 @@ class Application(QObject):
         library_layout.addWidget(self.open_button)
         self.library = QListWidget()
         self.library.setAccessibleName("Source videos")
+        self.library.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.library.setDefaultDropAction(Qt.DropAction.CopyAction)
         self.library.setAcceptDrops(True)
         self.library.viewport().setAcceptDrops(True)
         self.library.viewport().installEventFilter(self)
@@ -184,6 +191,29 @@ class Application(QObject):
         self.clear_sources_button = QPushButton("Clear All Sources")
         self.clear_sources_button.clicked.connect(self.clear)
         library_layout.addWidget(self.clear_sources_button)
+        scan_row = QHBoxLayout()
+        self.parallel_scanning = QCheckBox("Source scanning threads")
+        self.parallel_scanning.setChecked(
+            self.settings.value("sources/parallel_scanning", True, type=bool)
+        )
+        self.scan_threads = QSpinBox()
+        self.scan_threads.setRange(1, 2147483647)
+        self.scan_threads.setValue(
+            self.settings.value("sources/scan_threads", 2, type=int)
+        )
+        self.scan_threads.setAccessibleName("Source scanning threads")
+        self.scan_threads.setToolTip(
+            "Number of concurrent FFprobe workers used when creating timelines."
+        )
+        self.parallel_scanning.toggled.connect(
+            lambda enabled: self.settings.setValue("sources/parallel_scanning", enabled)
+        )
+        self.scan_threads.valueChanged.connect(
+            lambda count: self.settings.setValue("sources/scan_threads", count)
+        )
+        scan_row.addWidget(self.parallel_scanning)
+        scan_row.addWidget(self.scan_threads)
+        library_layout.addLayout(scan_row)
         self.library_dock = QDockWidget("Source videos", self.window)
         self.library_dock.setObjectName("sourceVideos")
         self.library_dock.setWidget(library_widget)
@@ -333,6 +363,25 @@ class Application(QObject):
         self.output_panel = QWidget()
         form = QFormLayout(self.output_panel)
         self.project_name = QLineEdit(self.settings.value("output/project", ""))
+        self.project_from_folder = QCheckBox("Enable")
+        self.project_from_folder.setAccessibleName("Enable project from folder")
+        self.project_from_folder.setChecked(
+            self.settings.value("output/project_from_folder", False, type=bool)
+        )
+        self.project_folder_level = QSpinBox()
+        self.project_folder_level.setRange(-2147483648, 0)
+        self.project_folder_level.setValue(
+            self.settings.value("output/project_folder_level", 0, type=int)
+        )
+        self.project_folder_level.setAccessibleName("Project from folder")
+        self.project_folder_level.setToolTip(
+            "0: first source's parent folder; -1: one folder up; -2: two folders up."
+        )
+        project_folder_row = QHBoxLayout()
+        project_folder_row.addWidget(self.project_from_folder)
+        project_folder_row.addWidget(self.project_folder_level, 1)
+        self.project_from_folder.toggled.connect(self.update_project_from_folder)
+        self.project_folder_level.valueChanged.connect(self.update_project_from_folder)
         self.filename_format = QLineEdit(
             self.settings.value("output/format", "{project}.Assembly.{date}.mp4")
         )
@@ -345,9 +394,19 @@ class Application(QObject):
         folder_row = QHBoxLayout()
         folder_row.addWidget(self.output_folder, 1)
         folder_row.addWidget(self.output_browse)
+        self.output_open = QPushButton("Open Output Folder")
+        self.output_open.setEnabled(bool(self.output_folder.text().strip()))
+        self.output_folder.textChanged.connect(
+            lambda text: self.output_open.setEnabled(bool(text.strip()))
+        )
+        self.output_open.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_folder.text()))
+        )
         form.addRow("Project", self.project_name)
+        form.addRow("Project from folder", project_folder_row)
         form.addRow("Name format", self.filename_format)
         form.addRow("Output folder", folder_row)
+        form.addRow("", self.output_open)
         for label, widget, key in (
             ("Project", self.project_name, "project"),
             ("Name format", self.filename_format, "format"),
@@ -367,6 +426,19 @@ class Application(QObject):
             self.audio_dock, self.output_dock, Qt.Orientation.Vertical
         )
         view_menu.addAction(self.output_dock.toggleViewAction())
+
+    def update_project_from_folder(self):
+        enabled = self.project_from_folder.isChecked()
+        self.project_name.setReadOnly(enabled)
+        if self.clips:
+            parents = self.clips[0].path.parents
+            self.project_folder_level.blockSignals(True)
+            self.project_folder_level.setRange(1 - len(parents), 0)
+            self.project_folder_level.blockSignals(False)
+            if enabled:
+                self.project_name.setText(parents[-self.project_folder_level.value()].name)
+        self.settings.setValue("output/project_from_folder", enabled)
+        self.settings.setValue("output/project_folder_level", self.project_folder_level.value())
 
     def browse_output_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -450,57 +522,110 @@ class Application(QObject):
     def add_paths(self, paths, initialize_project=True):
         known = {clip.path for clip in self.clips}
         additions = [path for path in video_paths(paths) if path not in known]
-        if initialize_project and paths and not self.clips:
+        if (
+            initialize_project and paths and not self.clips
+            and not self.project_from_folder.isChecked()
+        ):
             source = Path(paths[0]).resolve()
             self.project_name.setText(
                 source.name if source.is_dir() else source.parent.name
             )
         if not additions:
             return
-        self.pending = additions
+        self.clips.extend(Source(path) for path in additions)
         self.settings.setValue(
-            "sources/paths", [str(clip.path) for clip in self.clips] + [str(path) for path in additions]
+            "sources/paths", [str(clip.path) for clip in self.clips]
         )
         self.settings.sync()
+        self.refresh()
+
+    def create_timelines(self):
+        self.scanning_paused = False
+        self.scan_stop_requested = False
+        self.pending = [clip.path for clip in self.clips if isinstance(clip, Source)]
+        if not self.pending:
+            self.rebalance()
+            return
         self.progress.setFormat("%v / %m videos scanned")
-        self.progress.setRange(0, len(additions))
-        self.progress.setValue(0)
+        self.progress.setRange(0, len(self.clips))
+        self.progress.setValue(len(self.clips) - len(self.pending))
+        self.scan_worker_count = (
+            self.scan_threads.value() if self.parallel_scanning.isChecked() else 1
+        )
+        for _ in range(len(self.probes), min(self.scan_worker_count, len(self.pending))):
+            probe = QProcess(self)
+            probe.finished.connect(partial(self.probed, probe))
+            self.probes.append(probe)
         self.loading = True
         self.update_enabled()
         self.probe_next()
 
     def probe_next(self):
-        if not self.pending:
+        if not self.pending and not self.probing_paths:
             self.loading = False
-            self.refresh()
-            self.window.statusBar().showMessage("Ready")
+            self.scanning_paused = False
+            self.scan_stop_requested = False
+            self.rebalance()
             return
-        self.probing_path = self.pending.pop(0)
-        self.log_dock.show()
-        self.window.statusBar().showMessage(
-            f"Scanning {self.progress.value()} / {self.progress.maximum()} complete - {self.probing_path.name}"
-        )
-        self.probe.start(
-            self.ffprobe,
-            [
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-of",
-                "json",
-                str(self.probing_path),
-            ],
-        )
+        if self.scan_stop_requested:
+            if not self.probing_paths:
+                self.loading = False
+                self.scanning_paused = False
+                self.scan_stop_requested = False
+                self.window.statusBar().showMessage("Scanning stopped - Create Timelines resumes remaining sources")
+                self.refresh()
+            return
+        if self.scanning_paused:
+            if not self.probing_paths:
+                self.window.statusBar().showMessage("Scanning paused - completed scans retained")
+            return
+        for probe in self.probes[:self.scan_worker_count]:
+            if self.pending and probe not in self.probing_paths:
+                path = self.pending.pop(0)
+                self.probing_paths[probe] = path
+                self.log_dock.show()
+                self.window.statusBar().showMessage(
+                    f"Scanning {self.progress.value()} / {self.progress.maximum()} complete - {path.name}"
+                )
+                probe.start(
+                    self.ffprobe,
+                    [
+                        "-v",
+                        "error",
+                        "-show_streams",
+                        "-show_format",
+                        "-of",
+                        "json",
+                        str(path),
+                    ],
+                )
 
-    def probed(self, exit_code, exit_status):
-        self.log.appendPlainText(bytes(self.probe.readAllStandardError()).decode())
-        self.clips.append(
-            clip_from_probe(
-                self.probing_path, json.loads(bytes(self.probe.readAllStandardOutput()))
-            )
+    def pause_scanning(self):
+        self.scanning_paused = not self.scanning_paused
+        self.window.statusBar().showMessage(
+            "Pausing scanning after active scans finish" if self.scanning_paused
+            else "Resuming scanning"
         )
+        self.update_enabled()
+        self.probe_next()
+
+    def stop_scanning(self):
+        self.scan_stop_requested = True
+        self.window.statusBar().showMessage("Stopping scanning after active scans finish")
+        self.update_enabled()
+        self.probe_next()
+
+    def probed(self, probe, exit_code, exit_status):
+        self.log.appendPlainText(bytes(probe.readAllStandardError()).decode())
+        clip = clip_from_probe(
+            self.probing_paths[probe], json.loads(bytes(probe.readAllStandardOutput()))
+        )
+        index = next(i for i, source in enumerate(self.clips) if source.path == clip.path)
+        if self.selected_clip == self.clips[index]:
+            self.selected_clip = clip
+        self.clips[index] = clip
         self.progress.setValue(self.progress.value() + 1)
+        del self.probing_paths[probe]
         self.probe_next()
 
     def clear(self):
@@ -508,11 +633,16 @@ class Application(QObject):
         self.clips.clear()
         self.settings.setValue("sources/paths", [])
         self.settings.sync()
-        self.assembler.tracks = [[], [], []]
+        self.assembler.tracks = [[] for _ in range(3 * self.assembler.divisions.value())]
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         self.window.statusBar().showMessage("Ready")
+        self.refresh()
+
+    def divisions_changed(self, value):
+        self.settings.setValue("assembly/divisions", value)
+        self.assembler.tracks = [[] for _ in range(3 * value)]
         self.refresh()
 
     def rebalance(self, longest_first=False):
@@ -521,15 +651,12 @@ class Application(QObject):
         self.window.statusBar().showMessage("Ready")
 
     def refresh(self):
+        self.update_project_from_folder()
         selected_paths = {
             item.data(Qt.ItemDataRole.UserRole).path
             for item in self.library.selectedItems()
         }
         config = self.render_config()
-        for index, label in enumerate(self.assembler.column_headers):
-            label.setText(
-                f"{"ABC"[index]} - {COLUMN_NAMES[index]}\n⅓ of output - {config.column_width} × {config.height}"
-            )
         self.library.blockSignals(True)
         self.library.clear()
         for clip in self.clips:
@@ -552,50 +679,48 @@ class Application(QObject):
         for axis in ("left", "bottom"):
             self.assembler.timeline.getAxis(axis).setTextPen(palette.text().color())
             self.assembler.timeline.getAxis(axis).setPen(palette.text().color())
-        for column, (track, listing) in enumerate(
-            zip(self.assembler.tracks, self.assembler.lists)
-        ):
-            listing.blockSignals(True)
-            listing.clear()
-            start = 0
-            for number, clip in enumerate(track):
-                duration = clip_duration(clip, config)
-                item = QListWidgetItem(
-                    f"{number + 1}. {clip.path.name}\n"
-                    f"{timestamp(start)} → {timestamp(start + duration)} "
-                    f"- {timestamp(duration)}"
+        self.assembler.division_offsets = []
+        self.assembler.segment_bounds = []
+        self.assembler.dividers = []
+        self.assembler.track_labels = []
+        offset = 0.0
+        for group_start in range(0, len(self.assembler.tracks), 3):
+            self.assembler.division_offsets.append(offset)
+            if group_start:
+                divider = pg.InfiniteLine(offset, angle=90, pen=pg.mkPen(palette.text().color(), width=2))
+                self.assembler.timeline.addItem(divider)
+                self.assembler.dividers.append(divider)
+            for column in range(group_start, group_start + 3):
+                track = self.assembler.tracks[column]
+                y = 2 - column % 3
+                heading = pg.TextItem(
+                    f"{timeline_name(column)} - {len(track)} clips - {timestamp(durations[column])}",
+                    color=palette.text().color(), anchor=(0, 1),
                 )
-                item.setData(Qt.ItemDataRole.UserRole, clip)
-                item.setToolTip(str(clip.path))
-                listing.addItem(item)
-                brush = palette.highlight().color()
-                brush.setAlpha(190 if number % 2 == 0 else 110)
-                bar = pg.BarGraphItem(
-                    x0=start,
-                    width=duration,
-                    y=2 - column,
-                    height=0.65,
-                    brush=brush,
-                    pen=palette.text().color(),
-                )
-                bar.setToolTip(f"{clip.path.name} - {timestamp(duration)}")
-                self.assembler.timeline.addItem(bar)
-                self.assembler.segment_bars.append((clip, bar))
-                label = pg.TextItem(
-                    str(number + 1),
-                    color=palette.text().color(),
-                    fill=palette.base().color(),
-                    anchor=(0.5, 0.5),
-                )
-                label.setPos(start + duration / 2, 2 - column)
-                self.assembler.timeline.addItem(label)
-                start += duration
-            listing.blockSignals(False)
-            self.assembler.track_labels[column].setText(
-                f"{COLUMN_NAMES[column]} - {len(track)} clips - {timestamp(durations[column])}"
-            )
-        self.assembler.timeline.setYRange(-0.6, 2.6, padding=0)
-        self.assembler.timeline.setXRange(0, max(1, max(durations)), padding=0.02)
+                heading.setPos(offset, y + 0.35)
+                self.assembler.timeline.addItem(heading)
+                self.assembler.track_labels.append(heading)
+                start = offset
+                for number, clip in enumerate(track):
+                    duration = clip_duration(clip, config)
+                    brush = palette.highlight().color()
+                    brush.setAlpha(190 if number % 2 == 0 else 110)
+                    bar = pg.BarGraphItem(
+                        x0=start, width=duration, y=y, height=0.65,
+                        brush=brush, pen=palette.text().color(),
+                    )
+                    bar.setToolTip(f"{timeline_name(column)} - {clip.path.name} - {timestamp(duration)}")
+                    self.assembler.timeline.addItem(bar)
+                    self.assembler.segment_bars.append((clip, bar))
+                    self.assembler.segment_bounds.append((column, start, start + duration, clip))
+                    label = pg.TextItem(str(number + 1), color=palette.text().color(),
+                                        fill=palette.base().color(), anchor=(0.5, 0.5))
+                    label.setPos(start + duration / 2, y)
+                    self.assembler.timeline.addItem(label)
+                    start += duration
+            offset += max(1, max(durations[group_start:group_start + 3]))
+        self.assembler.timeline.setYRange(-0.6, 2.8, padding=0)
+        self.assembler.timeline.setXRange(0, offset, padding=0.02)
         self.select_clip(self.selected_clip)
         self.library.blockSignals(True)
         for row in range(self.library.count()):
@@ -613,13 +738,9 @@ class Application(QObject):
             sync_source=False,
         )
 
-    def select_column(self, column, row):
-        if row >= 0:
-            self.select_clip(self.assembler.tracks[column][row])
-
     def select_clip(self, clip, sync_source=True):
         self.selected_clip = clip
-        listings = [self.library, *self.assembler.lists] if sync_source else self.assembler.lists
+        listings = [self.library] if sync_source else []
         for listing in listings:
             listing.blockSignals(True)
             row = next(
@@ -634,9 +755,10 @@ class Application(QObject):
             if row >= 0:
                 listing.scrollToItem(listing.item(row))
             listing.blockSignals(False)
-        for column, listing in enumerate(self.assembler.lists):
-            if listing.currentRow() >= 0:
-                self.assembler.active_column = column
+        self.assembler.active_column, self.assembler.active_row = next(
+            ((column, row) for column, track in enumerate(self.assembler.tracks)
+             for row, source in enumerate(track) if source == clip), (-1, -1)
+        )
         for source, bar in self.assembler.segment_bars:
             bar.setOpts(
                 pen=pg.mkPen(
@@ -664,54 +786,48 @@ class Application(QObject):
 
     def reorder(self, offset):
         column = self.assembler.active_column
-        row = self.assembler.lists[column].currentRow()
+        row = self.assembler.active_row
         track = self.assembler.tracks[column]
         track[row], track[row + offset] = track[row + offset], track[row]
         self.refresh()
-        self.assembler.lists[column].setCurrentRow(row + offset)
 
     def move_column(self, offset):
         column = self.assembler.active_column
-        row = self.assembler.lists[column].currentRow()
+        row = self.assembler.active_row
         clip = self.assembler.tracks[column].pop(row)
         target = column + offset
         self.assembler.tracks[target].append(clip)
         self.refresh()
-        self.assembler.lists[target].setCurrentRow(
-            len(self.assembler.tracks[target]) - 1
-        )
 
     def timeline_clicked(self, event):
         if self.running or self.loading:
             return
         point = self.assembler.timeline.getViewBox().mapSceneToView(event.scenePos())
-        column = 2 - round(point.y())
-        if column in range(3) and abs(point.y() - (2 - column)) <= 0.325:
-            config = self.render_config()
-            start = 0
-            for row, clip in enumerate(self.assembler.tracks[column]):
-                duration = clip_duration(clip, config)
-                if start <= point.x() < start + duration:
+        row = 2 - round(point.y())
+        if row in range(3) and abs(point.y() - (2 - row)) <= 0.325:
+            for column, start, end, clip in self.assembler.segment_bounds:
+                if column % 3 == row and start <= point.x() < end:
                     self.select_clip(clip)
                     break
-                start += duration
-
-    def open_source(self, item):
-        QDesktopServices.openUrl(
-            QUrl.fromLocalFile(str(item.data(Qt.ItemDataRole.UserRole).path))
-        )
 
     def update_enabled(self):
         idle = not self.loading and not self.running
         for widget in (self.open_button, self.open_action, self.clear_action):
             widget.setEnabled(idle)
-        self.assembler.balance_button.setEnabled(idle and bool(self.clips))
-        self.assembler.longest_button.setEnabled(idle and bool(self.clips))
-        self.assembler.create_button.setEnabled(idle and any(clip.portrait for clip in self.clips))
+        scanned = bool(self.clips) and all(isinstance(clip, Clip) for clip in self.clips)
+        self.assembler.balance_button.setEnabled(idle and scanned)
+        self.assembler.longest_button.setEnabled(idle and scanned)
+        self.assembler.create_button.setEnabled(idle and bool(self.clips))
+        self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
+        self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
+        self.assembler.scan_stop_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks))
+        self.assembler.pause_button.setEnabled(self.running)
+        self.assembler.pause_button.setText("Resume" if self.render_paused else "Pause")
         self.assembler.stop_button.setEnabled(self.running)
         self.render_panel.setEnabled(idle)
         self.combine.setEnabled(idle)
+        self.assembler.remove_timelines.setEnabled(idle and self.combine.isChecked())
         self.audio_panel.setEnabled(idle)
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
@@ -723,17 +839,18 @@ class Application(QObject):
         )
         self.remove_sources_button.setEnabled(removable)
         self.clear_sources_button.setEnabled(idle and bool(self.clips))
-        for listing in self.assembler.lists:
-            listing.setEnabled(idle)
+        self.parallel_scanning.setEnabled(idle)
+        self.scan_threads.setEnabled(idle)
+        self.assembler.divisions.setEnabled(idle)
         column = self.assembler.active_column
-        row = self.assembler.lists[column].currentRow()
+        row = self.assembler.active_row
         selected = idle and row >= 0 and len(self.library.selectedItems()) == 1
         self.assembler.up_button.setEnabled(selected and row > 0)
         self.assembler.down_button.setEnabled(
             selected and row < len(self.assembler.tracks[column]) - 1
         )
         self.assembler.left_button.setEnabled(selected and column > 0)
-        self.assembler.right_button.setEnabled(selected and column < 2)
+        self.assembler.right_button.setEnabled(selected and column < len(self.assembler.tracks) - 1)
 
     def choose_export(self):
         if not self.output_folder.text().strip():
@@ -747,11 +864,16 @@ class Application(QObject):
         self.start_export(Path(self.output_folder.text()) / filename)
 
     def start_export(self, output):
-        columns = [
-            output.with_name(f"{output.stem}_{name}.mp4") for name in ("A", "B", "C")
+        count = len(self.assembler.tracks)
+        columns = [output.with_name(f"{output.stem}_{timeline_name(index)}.mp4") for index in range(count)]
+        finals = [
+            output.with_name(f"{output.stem}_FINAL{suffix}.mp4")
+            for suffix in ([""] if count == 3 else [
+                "_" + "".join(timeline_name(index) for index in range(start, start + 3))
+                for start in range(0, count, 3)
+            ])
         ]
-        output = output.with_name(f"{output.stem}_FINAL.mp4")
-        targets = columns + ([output] if self.combine.isChecked() else [])
+        targets = columns + (finals if self.combine.isChecked() else [])
         existing = [path for path in targets if path.exists()]
         if existing:
             QMessageBox.critical(
@@ -761,7 +883,7 @@ class Application(QObject):
                 + "\n".join(str(path) for path in existing),
             )
             return
-        self.output = output
+        self.output = finals[-1]
         self.export_directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-")
         graph_root = Path(self.export_directory.name)
         config = self.render_config()
@@ -775,51 +897,60 @@ class Application(QObject):
         ]
         scheduled_measurements = set()
         self.column_cleanup = {}
-        for index, (track, path) in enumerate(zip(self.assembler.tracks, columns)):
-            group_start = len(self.export_jobs)
-            manifest = graph_root / f"column{index}.ffconcat"
-            jobs = list(column_jobs(track, path, manifest, config, self.audio_peaks))
-            temporary_paths = [manifest]
-            for clip, job in zip(track, jobs[:-1]):
-                if (
-                    config.audio_codec != "none"
-                    and config.normalization == "True Peak"
-                    and clip.has_audio
-                    and clip.path not in scheduled_measurements
-                ):
-                    self.measurement_keys[len(self.export_jobs)] = clip.path
+        for division_start in range(0, count, 3):
+            for index in range(division_start, division_start + 3):
+                track, path = self.assembler.tracks[index], columns[index]
+                group_start = len(self.export_jobs)
+                manifest = graph_root / f"column{index}.ffconcat"
+                jobs = list(column_jobs(track, path, manifest, config, self.audio_peaks))
+                temporary_paths = [manifest]
+                for clip, job in zip(track, jobs[:-1]):
+                    if (
+                        config.audio_codec != "none"
+                        and config.normalization == "True Peak"
+                        and clip.has_audio
+                        and clip.path not in scheduled_measurements
+                    ):
+                        self.measurement_keys[len(self.export_jobs)] = clip.path
+                        self.export_jobs.append(
+                            (clip.path, clip.duration, peak_measurement_arguments(clip))
+                        )
+                        scheduled_measurements.add(clip.path)
+                    self.export_jobs.append(job)
+                    temporary_paths.extend([job[0], job[0].with_suffix(".ffgraph")])
+                self.column_cleanup[len(self.export_jobs)] = temporary_paths
+                self.export_jobs.append(jobs[-1])
+                self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
+            if self.combine.isChecked():
+                output = finals[division_start // 3]
+                group_columns = columns[division_start:division_start + 3]
+                duration = max(durations[division_start:division_start + 3])
+                group_start = len(self.export_jobs)
+                if config.audio_codec != "none" and config.normalization == "True Peak":
+                    self.measurement_keys[len(self.export_jobs)] = output
                     self.export_jobs.append(
-                        (clip.path, clip.duration, peak_measurement_arguments(clip))
+                        (
+                            output,
+                            duration,
+                            mix_peak_arguments(group_columns, duration),
+                        )
                     )
-                    scheduled_measurements.add(clip.path)
-                self.export_jobs.append(job)
-                temporary_paths.extend([job[0], job[0].with_suffix(".ffgraph")])
-            self.column_cleanup[len(self.export_jobs)] = temporary_paths
-            self.export_jobs.append(jobs[-1])
-            self.export_groups.append(("ABC"[index], group_start, len(self.export_jobs)))
-        if self.combine.isChecked():
-            group_start = len(self.export_jobs)
-            if config.audio_codec != "none" and config.normalization == "True Peak":
-                self.measurement_keys[len(self.export_jobs)] = output
-                self.export_jobs.append(
-                    (
-                        output,
-                        max(durations),
-                        mix_peak_arguments(columns, max(durations)),
-                    )
+                args = partial(
+                    composition_arguments,
+                    group_columns,
+                    duration,
+                    output,
+                    graph_root / f"composition{division_start // 3}.ffgraph",
+                    config,
                 )
-            args = partial(
-                composition_arguments,
-                columns,
-                max(durations),
-                output,
-                graph_root / "composition.ffgraph",
-                config,
-            )
-            self.export_jobs.append((output, max(durations), args))
-            self.export_groups.append(("FINAL", group_start, len(self.export_jobs)))
+                self.export_jobs.append((output, duration, args))
+                if self.assembler.remove_timelines.isChecked():
+                    self.column_cleanup[len(self.export_jobs) - 1] = group_columns
+                self.export_groups.append(("FINAL" if count == 3 else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + 3)), group_start, len(self.export_jobs)))
         self.export_index = 0
         self.stop_requested = False
+        self.render_paused = False
+        self.render_waiting = False
         self.progress.setValue(0)
         self.log.clear()
         self.log_dock.show()
@@ -856,9 +987,22 @@ class Application(QObject):
         self.log.appendPlainText(f"{operation} {path}\n")
         self.process.start(self.ffmpeg, args)
 
+    def pause_export(self):
+        self.render_paused = not self.render_paused
+        self.update_enabled()
+        if self.render_paused:
+            self.window.statusBar().showMessage("Pausing rendering after the current job finishes")
+        elif self.render_waiting:
+            self.group_started += monotonic() - self.render_pause_started
+            self.render_waiting = False
+            self.start_export_job()
+
     def stop_export(self):
         self.stop_requested = True
-        self.process.write(b"q\n")
+        if self.render_waiting:
+            self.finished(0, QProcess.ExitStatus.NormalExit)
+        else:
+            self.process.write(b"q\n")
 
     def read_progress(self):
         self.progress_buffer += bytes(self.process.readAllStandardOutput()).decode()
@@ -920,9 +1064,17 @@ class Application(QObject):
             and self.export_index + 1 < len(self.export_jobs)
         ):
             self.export_index += 1
-            self.start_export_job()
+            if self.render_paused:
+                self.render_waiting = True
+                self.render_pause_started = monotonic()
+                self.window.statusBar().showMessage("Rendering paused - completed jobs retained")
+                self.update_enabled()
+            else:
+                self.start_export_job()
             return
         self.running = False
+        self.render_paused = False
+        self.render_waiting = False
         self.export_directory.cleanup()
         self.export_directory = None
         result = (
@@ -962,9 +1114,6 @@ class Application(QObject):
             self.settings.setValue("mainWindow/geometry", self.window.saveGeometry())
             self.settings.setValue("sources/paths", [str(clip.path) for clip in self.clips])
             self.settings.setValue("mainWindow/state", self.window.saveState(1))
-            self.settings.setValue(
-                "mainWindow/splitterState", self.assembler.splitter.saveState()
-            )
             self.settings.sync()
         return super().eventFilter(watched, event)
 

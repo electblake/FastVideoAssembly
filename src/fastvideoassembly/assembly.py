@@ -12,6 +12,11 @@ VIDEO_EXTENSIONS = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 
 
 @dataclass(frozen=True)
+class Source:
+    path: Path
+
+
+@dataclass(frozen=True)
 class Clip:
     path: Path
     duration: float
@@ -61,15 +66,24 @@ def clip_from_probe(path, metadata):
     )
 
 
-def balance(clips, longest_first=False):
+def timeline_name(index):
+    name = ""
+    index += 1
+    while index:
+        index, letter = divmod(index - 1, 26)
+        name = chr(65 + letter) + name
+    return name
+
+
+def balance(clips, longest_first=False, track_count=3):
     """Balance track totals, then sort clips by duration in the requested direction."""
-    tracks = [[], [], []]
-    durations = [0.0, 0.0, 0.0]
+    tracks = [[] for _ in range(track_count)]
+    durations = [0.0] * track_count
     for clip in sorted(
         clips,
         key=lambda clip: (-clip.duration, str(clip.path)),
     ):
-        index = min(range(3), key=lambda index: durations[index])
+        index = min(range(track_count), key=lambda index: durations[index])
         tracks[index].append(clip)
         durations[index] += clip.duration
     for track in tracks:
