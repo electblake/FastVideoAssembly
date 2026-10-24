@@ -380,6 +380,8 @@ def test_gui_import_and_full_resolution_export(
     controller.add_paths([clip.path for clip in media])
     qtbot.waitUntil(lambda: not controller.loading, timeout=30000)
     assert len(controller.clips) == 4
+    assert not controller.assembler.export_button.isEnabled()
+    controller.assembler.create_button.click()
     assert controller.assembler.export_button.isEnabled()
     output = tmp_path / "gui-output.mp4"
     controller.start_export(output)

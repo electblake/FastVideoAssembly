@@ -39,7 +39,7 @@ class Preview(QWidget):
         self.stop_button.clicked.connect(self.player.stop)
         controls.addWidget(self.play_button)
         controls.addWidget(self.stop_button)
-        self.time = QLabel("00:00 / 00:00")
+        self.time = QLabel("00:00:00 / 00:00:00")
         controls.addWidget(self.time)
         layout.addLayout(controls)
         self.player.durationChanged.connect(self.update_position)
@@ -79,6 +79,6 @@ class Preview(QWidget):
             self.scrubber.setValue(position)
             self.scrubber.blockSignals(False)
         self.time.setText(
-            f"{position // 60000:02d}:{position // 1000 % 60:02d} / "
-            f"{duration // 60000:02d}:{duration // 1000 % 60:02d}"
+            f"{position // 3600000:02d}:{position // 60000 % 60:02d}:{position // 1000 % 60:02d} / "
+            f"{duration // 3600000:02d}:{duration // 60000 % 60:02d}:{duration // 1000 % 60:02d}"
         )

@@ -16,7 +16,10 @@ uv run fastvideoassembly
 Use Add Videos or Ctrl+O to select videos and folders together, drop files/folders onto the source list or window, or pass paths to
 `uv run fastvideoassembly "C:\Videos"`. Imports include immediate MP4, MKV, MOV,
 AVI and WebM files, without recursion or duplicates. Importing adds to the
-library and rebuilds the balanced arrangement. Clear assembly starts over.
+library without changing timelines. Click Create Timelines to build the arrangement;
+Shortest First and Longest First explicitly rebuild and sort it. Clear assembly starts over.
+The source list is saved when changed, alongside window state on close, and restored on the next launch.
+Restoring sources reads their metadata again without creating timelines.
 
 The shared source library lists filenames without assembler-specific labels or
 filtering. The **3 Column Assembly** central tab accepts display aspect ratios

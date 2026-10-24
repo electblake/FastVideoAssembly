@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Saved source video paths with window state and restored them on startup, preserving source order and custom project names without creating timelines.
+
+### Changed
+
+- Stopped automatic timeline creation and sorting after imports; added Create Timelines beside Render Column Assembly and enlarged the Stop button.
+- Grouped render progress by A, B, C, and FINAL, with a duration-weighted completion percentage and estimated remaining time in `HH:MM:SS`; scanning uses completed/total video counts.
+
+### Fixed
+
+- Persisted source additions, removals, and clearing immediately, including the full import queue so interrupted scans retain pending sources.
+- Formatted column lengths, clip times, output length, and preview times as `HH:MM:SS`, including durations over one hour.
+
 ## [0.2.0] - 2026-10-23
 
 ### Added

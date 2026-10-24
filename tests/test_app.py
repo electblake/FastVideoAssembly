@@ -87,29 +87,37 @@ def test_missing_output_folder_stops_in_status_bar(controller, monkeypatch):
     assert "output folder" in controller.window.statusBar().currentMessage()
 
 
-def test_progress_resets_and_tracks_only_the_current_step(
-    controller, tmp_path, monkeypatch
-):
+def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
     process = Mock()
     monkeypatch.setattr(controller, "process", process)
-    controller.export_jobs = [(tmp_path / f"step{i}.mp4", 100, []) for i in range(100)]
-    controller.measurement_keys = {98: tmp_path / "audio.mp4"}
-    controller.export_index = 98
-    controller.progress.setValue(980)
+    clock = [100.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
+    controller.export_jobs = [(tmp_path / f"step{i}.mp4", 100, []) for i in range(5)]
+    controller.export_groups = [("A", 0, 2), ("B", 2, 4), ("FINAL", 4, 5)]
+    controller.measurement_keys = {0: tmp_path / "audio.mp4"}
+    controller.export_index = 0
     controller.start_export_job()
-    assert controller.progress.value() == 0
-    process.readAllStandardOutput.return_value = b"out_time_us=25000000\n"
-    controller.read_progress()
-    assert controller.progress.value() == 250
-    controller.export_index = 99
-    controller.start_export_job()
-    assert controller.progress.value() == 0
+    assert "ETA --:--:--" in controller.progress.text()
+    clock[0] = 110
     process.readAllStandardOutput.return_value = b"out_time_us=50000000\n"
     controller.read_progress()
+    assert controller.progress.value() == 250
+    assert "ETA 00:00:30" in controller.progress.text()
+    controller.export_index = 1
+    controller.start_export_job()
     assert controller.progress.value() == 500
-    process.readAllStandardOutput.return_value = b"out_time_us=100000000\n"
+    clock[0] = 120
     controller.read_progress()
-    assert controller.progress.value() == 999
+    assert controller.progress.value() == 750
+    process.readAllStandardOutput.return_value = b"out_time_us=0\n"
+    controller.read_progress()
+    assert controller.progress.value() == 750
+    for index, name in [(2, "B"), (4, "FINAL")]:
+        controller.export_index = index
+        controller.start_export_job()
+        assert controller.progress.value() == 0
+        assert controller.progress.text().startswith(name)
+        assert "ETA --:--:--" in controller.progress.text()
 
 
 @pytest.mark.parametrize("stopped,exit_code", [(False, 0), (True, 0), (False, 1)])
@@ -121,6 +129,7 @@ def test_progress_completes_only_after_successful_exit(
     process.readAllStandardError.return_value = b""
     monkeypatch.setattr(controller, "process", process)
     controller.export_jobs = [(tmp_path / "final.mp4", 100, [])]
+    controller.export_groups = [("FINAL", 0, 1)]
     controller.export_index = 0
     controller.measurement_keys = {}
     controller.column_cleanup = {}
@@ -442,15 +451,17 @@ def test_excluded_source_can_be_selected_and_removed(controller, preview_source)
     assert preview_source.exists()
 
 
-def test_import_shows_busy_progress_instead_of_previous_render_percentage(
+def test_import_counts_scanned_videos(
     controller, preview_source, qtbot
 ):
     controller.progress.setValue(1000)
     controller.add_paths([preview_source])
-    assert controller.progress.minimum() == controller.progress.maximum() == 0
+    assert controller.progress.value() == 0
+    assert controller.progress.maximum() == 1
     qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
-    assert controller.progress.maximum() == 1000
-    assert controller.progress.value() == 1000
+    assert controller.progress.maximum() == 1
+    assert controller.progress.value() == 1
+    assert controller.progress.text() == "1 / 1 videos scanned"
 
 
 def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tmp_path):
@@ -459,7 +470,7 @@ def test_timeline_uses_rendered_frame_boundaries_and_ignores_gaps(controller, tm
     controller.clips = [first, second]
     controller.assembler.tracks = [[first, second], [], []]
     controller.refresh()
-    assert controller.assembler.summary.text() == "Output Length: 00:00.3"
+    assert controller.assembler.summary.text() == "Output Length: 00:00:00"
     assert controller.assembler.segment_bars[0][1].opts["width"] == pytest.approx(
         4 / 30
     )
@@ -788,3 +799,98 @@ def test_add_videos_entry_points_and_cancel(controller, tmp_path, monkeypatch, o
     dialog.exec.return_value = app.QDialog.DialogCode.Rejected
     trigger()
     add.assert_not_called()
+
+
+@pytest.mark.parametrize('seconds,expected', [(0, '00:00:00'), (59.99, '00:00:59'), (60, '00:01:00'), (3599.99, '00:59:59'), (3600, '01:00:00'), (6267.4, '01:44:27'), (90061, '25:01:01')])
+def test_hour_duration_format(seconds, expected):
+    assert app.timestamp(seconds) == expected
+
+
+def test_preview_hour_duration_format(controller, monkeypatch):
+    monkeypatch.setattr(controller.preview.player, 'position', lambda: 3600000)
+    monkeypatch.setattr(controller.preview.player, 'duration', lambda: 6267400)
+    controller.preview.update_position()
+    assert controller.preview.time.text() == '01:00:00 / 01:44:27'
+
+
+def test_import_waits_for_explicit_timeline_creation(controller, preview_source, tmp_path, qtbot):
+    controller.add_paths([preview_source])
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert controller.assembler.tracks == [[], [], []]
+    assert controller.assembler.create_button.isEnabled()
+    controller.assembler.create_button.click()
+    tracks = [list(track) for track in controller.assembler.tracks]
+    added = tmp_path / 'additional.mp4'
+    added.hardlink_to(preview_source)
+    controller.add_paths([added])
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert len(controller.clips) == 2
+    assert controller.assembler.tracks == tracks
+    controller.assembler.create_button.click()
+    assert sum(map(len, controller.assembler.tracks)) == 2
+    assert controller.assembler.export_button.text() == 'Render Column Assembly'
+    controller.combine.setChecked(False)
+    assert controller.assembler.export_button.text() == 'Render Column Assembly'
+    assert controller.assembler.stop_button.text() == 'Stop'
+    assert controller.assembler.stop_button.property('buttonSize') == 'large'
+    controller.running = True
+    controller.update_enabled()
+    assert not controller.assembler.create_button.isEnabled()
+    controller.running = False
+
+
+def test_source_list_restores_on_restart_without_creating_timelines(controller, preview_source, tmp_path, qtbot):
+    extra = tmp_path / 'extra.mp4'
+    extra.hardlink_to(preview_source)
+    controller.add_paths([preview_source, extra])
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    controller.library.setCurrentRow(1)
+    controller.remove_sources_button.click()
+    controller.project_name.setText('Custom project')
+    controller.window.close()
+    assert controller.settings.value('sources/paths', type=list) == [str(preview_source)]
+    restored = app.Application(paths=[preview_source, extra])
+    qtbot.addWidget(restored.window)
+    qtbot.waitUntil(lambda: not restored.loading, timeout=15000)
+    assert [clip.path for clip in restored.clips] == [preview_source, extra]
+    assert restored.project_name.text() == 'Custom project'
+    assert restored.assembler.tracks == [[], [], []]
+    assert restored.library.count() == 2
+    restored.clear()
+    restored.window.close()
+    empty = app.Application()
+    qtbot.addWidget(empty.window)
+    assert empty.clips == []
+    assert not empty.loading
+
+
+def test_source_changes_persist_without_closing(controller, preview_source, tmp_path, qtbot):
+    from PySide6.QtCore import QSettings
+
+    second = tmp_path / 'second.mp4'
+    second.hardlink_to(preview_source)
+    controller.add_paths([second, preview_source])
+    saved = QSettings(controller.settings.fileName(), QSettings.Format.IniFormat)
+    assert saved.value('sources/paths', type=list) == [str(second), str(preview_source)]
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    controller.library.setCurrentRow(0)
+    controller.remove_sources_button.click()
+    saved.sync()
+    assert saved.value('sources/paths', type=list) == [str(preview_source)]
+    controller.clear()
+    saved.sync()
+    assert saved.value('sources/paths', type=list) == []
+
+
+def test_interrupted_restore_retains_complete_saved_queue(controller, preview_source, tmp_path, qtbot, monkeypatch):
+    second = tmp_path / 'second.mp4'
+    second.hardlink_to(preview_source)
+    controller.settings.setValue('sources/paths', [str(second), str(preview_source)])
+    controller.settings.sync()
+    monkeypatch.setattr(app.Application, 'probe_next', Mock())
+    restored = app.Application(paths=[preview_source])
+    qtbot.addWidget(restored.window)
+    assert restored.pending == [second, preview_source]
+    assert restored.settings.value('sources/paths', type=list) == [str(second), str(preview_source)]
+    assert restored.assembler.tracks == [[], [], []]
+    restored.loading = False
