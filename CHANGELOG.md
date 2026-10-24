@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-23
+
 ### Added
 
 - Added mixed video/folder selection through Add Videos and direct drops onto the source list for incremental imports.
