@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-23
+
 ### Added
 
 - Saved source video paths with window state and restored them on startup, preserving source order and custom project names without creating timelines.
