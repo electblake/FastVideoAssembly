@@ -1887,6 +1887,52 @@ def test_filename_only_add_and_restore_do_not_start_probe(controller, tmp_path, 
 
 
 @pytest.mark.profile
+def test_division_render_selection_persists(controller, qtbot, tmp_path):
+    controller.assembler.divisions.setValue(3)
+    assert all(box.isChecked() for box in controller.assembler.division_checkboxes)
+    controller.assembler.division_checkboxes[0].setChecked(False)
+    controller.refresh()
+    assert [box.isChecked() for box in controller.assembler.division_checkboxes] == [False, True, True]
+    controller.settings.sync()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    assert [box.isChecked() for box in restored.assembler.division_checkboxes] == [False, True, True]
+    restored.assembler.tracks = [[Clip(tmp_path / f"{index}.mp4", 1, 60, 120)] for index in range(9)]
+    restored.refresh()
+    assert restored.assembler.export_button.isEnabled()
+    for box in restored.assembler.division_checkboxes:
+        if box.isChecked():
+            qtbot.mouseClick(box, Qt.MouseButton.LeftButton)
+    assert not restored.assembler.export_button.isEnabled()
+
+
+@pytest.mark.parametrize("render_timelines, combine", [(True, False), (True, True), (False, True)])
+def test_unchecked_division_is_excluded_from_export(controller, tmp_path, monkeypatch, render_timelines, combine):
+    controller.assembler.divisions.setValue(2)
+    controller.assembler.tracks = [[Clip(tmp_path / f"{index}.mp4", 1, 60, 120)] for index in range(6)]
+    controller.refresh()
+    controller.assembler.division_checkboxes[0].setChecked(False)
+    controller.assembler.render_timelines.setChecked(render_timelines)
+    controller.combine.setChecked(combine)
+    controller.audio_codec.setCurrentIndex(controller.audio_codec.findData("none"))
+    for suffix in ["A", "B", "C", "FINAL_ABC"]:
+        (tmp_path / f"selected_{suffix}.mp4").write_bytes(b"already rendered")
+    dialog = Mock()
+    monkeypatch.setattr(app.QMessageBox, "exec", dialog)
+    launch = Mock()
+    monkeypatch.setattr(controller, "start_export_job", launch)
+    controller.start_export(tmp_path / "selected.mp4")
+    dialog.assert_not_called()
+    launch.assert_called_once()
+    expected = (list("DEF") if render_timelines else []) + (["FINAL DEF"] if combine else [])
+    expected = [f"Division 2 - {name}" for name in expected]
+    assert [name for name, _start, _end in controller.export_groups] == expected
+    assert all(not box.isEnabled() for box in controller.assembler.division_checkboxes)
+    for suffix in ["A", "B", "C", "FINAL_ABC"]:
+        assert (tmp_path / f"selected_{suffix}.mp4").read_bytes() == b"already rendered"
+
+
+@pytest.mark.profile
 def test_divisions_balance_display_selection_and_settings(controller, tmp_path, qtbot, monkeypatch):
     from PySide6.QtWidgets import QListWidget
 
@@ -1965,7 +2011,11 @@ def test_two_divisions_render_independent_triples(controller, preview_source, tm
     controller.start_export(tmp_path / 'division.mp4')
     assert not controller.assembler.divisions.isEnabled()
     assert not controller.assembler.columns.isEnabled()
-    expected_groups = (list(first) if render_timelines else []) + ([f'FINAL {first}'] if combine else []) + (list(second) if render_timelines else []) + ([f'FINAL {second}'] if combine else [])
+    expected_groups = [
+        f"Division {division} - {name}"
+        for division, letters in enumerate([first, second], 1)
+        for name in (list(letters) if render_timelines else []) + ([f'FINAL {letters}'] if combine else [])
+    ]
     assert [group[0] for group in controller.export_groups] == expected_groups
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0

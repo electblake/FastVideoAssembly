@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-24
+
+### Added
+
+- Added saved render checkboxes beside division headings to include or exclude individual divisions from export.
+- Included division numbers in rendering progress labels.
+
+### Fixed
+
+- Excluded unchecked divisions from audio measurement, rendering, output replacement checks, and timeline cleanup.
+- Disabled rendering when no divisions are selected and prevented changing division selections during processing.
+
 ## [0.7.4] - 2026-10-24
 
 ### Fixed

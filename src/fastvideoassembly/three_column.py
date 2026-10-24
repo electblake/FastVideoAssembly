@@ -74,6 +74,7 @@ class ThreeColumnAssembly(QWidget):
         self.divisions.setAccessibleName("Divisions")
         self.tracks = [[] for _ in range(self.columns.currentData() * self.divisions.value())]
         self.selected_timelines = set()
+        self.division_checkboxes = []
         layout = QVBoxLayout(self)
         self.timeline = pg.PlotWidget()
         self.timeline.setAccessibleName(

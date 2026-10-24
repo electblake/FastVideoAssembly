@@ -191,6 +191,9 @@ has its own combined output: `_FINAL_ABC` and `_FINAL_DEF` with three columns,
 or `_FINAL_ABCD` and `_FINAL_EFGH` with four. A single division retains `_FINAL`.
 Each division and its optional final finish before the next division starts;
 all target filenames are checked before rendering begins.
+Each division heading has a saved render checkbox. Uncheck a division to skip
+its audio analysis and outputs; existing files for skipped divisions are left alone.
+Render is disabled when no divisions are selected. Progress identifies the active division.
 **Render interim timelines** is on by default. Uncheck it to encode each division
 from its source clips into its own final file, without saving timeline media.
 Large divisions use temporary compressed video segments at the selected encoding

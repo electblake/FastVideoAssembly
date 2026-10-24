@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QDockWidget,
     QFileDialog,
     QFormLayout,
+    QGraphicsProxyWidget,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -921,6 +922,7 @@ class Application(QObject):
             self.assembler.timeline.getAxis(axis).setTextPen(palette.text().color())
             self.assembler.timeline.getAxis(axis).setPen(palette.text().color())
         self.assembler.division_offsets = []
+        self.assembler.division_checkboxes = []
         self.assembler.segment_bounds = []
         self.assembler.dividers = []
         self.assembler.track_labels = []
@@ -936,6 +938,24 @@ class Application(QObject):
         for group_start in range(0, len(self.assembler.tracks), columns):
             group_width = max(1, max(durations[group_start:group_start + columns]))
             self.assembler.division_offsets.append(offset)
+            division_heading = pg.TextItem(
+                f"Division {group_start // columns + 1}",
+                color=palette.text().color(), anchor=(0.5, 0.5),
+            )
+            division_heading.setPos(offset + group_width / 2, columns - 0.35)
+            self.assembler.timeline.addItem(division_heading)
+            division = group_start // columns + 1
+            checkbox = QCheckBox()
+            checkbox.setAccessibleName(f"Render Division {division}")
+            checkbox.setChecked(self.settings.value(f"assembly/render_division_{division}", True, type=bool))
+            checkbox.toggled.connect(
+                lambda checked, division=division: self.settings.setValue(f"assembly/render_division_{division}", checked)
+            )
+            checkbox.toggled.connect(self.update_enabled)
+            proxy = QGraphicsProxyWidget(division_heading)
+            proxy.setWidget(checkbox)
+            proxy.setPos(division_heading.boundingRect().right() + 4, -proxy.boundingRect().height() / 2)
+            self.assembler.division_checkboxes.append(checkbox)
             if group_start:
                 divider = pg.InfiniteLine(offset, angle=90, pen=pg.mkPen(palette.text().color(), width=2))
                 self.assembler.timeline.addItem(divider)
@@ -1081,7 +1101,10 @@ class Application(QObject):
         self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
         self.assembler.scan_stop_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks)
+                                                and any(box.isChecked() for box in self.assembler.division_checkboxes)
                                                 and (self.combine.isChecked() or self.assembler.render_timelines.isChecked()))
+        for checkbox in self.assembler.division_checkboxes:
+            checkbox.setEnabled(idle)
         self.assembler.pause_button.setEnabled(self.running)
         self.assembler.pause_button.setText("Resume" if self.render_paused else "Pause")
         self.assembler.stop_button.setEnabled(self.running)
@@ -1181,6 +1204,10 @@ class Application(QObject):
         self.normalizing_audio = False
         count = len(self.assembler.tracks)
         columns_per_division = self.assembler.columns.currentData()
+        division_starts = [
+            index * columns_per_division
+            for index, checkbox in enumerate(self.assembler.division_checkboxes) if checkbox.isChecked()
+        ]
         columns = [output.with_name(f"{output.stem}_{timeline_name(index)}.mp4") for index in range(count)]
         finals = [
             output.with_name(f"{output.stem}_FINAL{suffix}.mp4")
@@ -1190,7 +1217,10 @@ class Application(QObject):
             ])
         ]
         render_timelines = self.assembler.render_timelines.isChecked()
-        targets = (columns if render_timelines else []) + (finals if self.combine.isChecked() else [])
+        targets = (
+            [columns[index] for start in division_starts for index in range(start, start + columns_per_division)]
+            if render_timelines else []
+        ) + ([finals[start // columns_per_division] for start in division_starts] if self.combine.isChecked() else [])
         existing = [path for path in targets if path.exists()]
         self.replace_outputs = set()
         if existing:
@@ -1223,7 +1253,7 @@ class Application(QObject):
         ]
         scheduled_measurements = set()
         self.column_cleanup = {}
-        for division_start in range(0, count, columns_per_division):
+        for division_start in division_starts:
             division_group_start = len(self.export_jobs)
             for index in range(division_start, division_start + columns_per_division):
                 track, path = self.assembler.tracks[index], columns[index]
@@ -1252,7 +1282,7 @@ class Application(QObject):
                         path, durations[index],
                         partial(column_arguments, track, path, graph_path, config, self.audio_peaks),
                     ))
-                    self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
+                    self.export_groups.append((f"Division {division_start // columns_per_division + 1} - {timeline_name(index)}", group_start, len(self.export_jobs)))
             if self.combine.isChecked():
                 output = finals[division_start // columns_per_division]
                 group_columns = columns[division_start:division_start + columns_per_division]
@@ -1304,7 +1334,7 @@ class Application(QObject):
                 self.export_jobs.append((output, duration, args))
                 if render_timelines and self.assembler.remove_timelines.isChecked():
                     self.column_cleanup[len(self.export_jobs) - 1] = group_columns
-                self.export_groups.append(("FINAL" if count == columns_per_division else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + columns_per_division)), group_start, len(self.export_jobs)))
+                self.export_groups.append((f"Division {division_start // columns_per_division + 1} - " + ("FINAL" if count == columns_per_division else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + columns_per_division))), group_start, len(self.export_jobs)))
         self.export_index = 0
         self.stop_requested = False
         self.render_paused = False
