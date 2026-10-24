@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a saved Render interim timelines checkbox above timeline deletion, enabled by default to preserve existing exports.
+- Added direct rendering to separate division final files when interim rendering is disabled, preserving clip normalization, frame timing, audio mixing, and True Peak source and final-mix analysis.
+- Added regression coverage confirming each division's final file completes before the next division begins processing, with or without interim timelines.
+
+### Changed
+
+- Disabled timeline deletion when interim rendering is off and excluded unused interim paths from overwrite checks.
+- Disabled Render when neither interim timelines nor final assembly output is selected.
+
 ## [0.5.0] - 2026-10-24
 
 ### Added

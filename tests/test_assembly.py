@@ -13,6 +13,7 @@ from fastvideoassembly.assembly import (
     clip_from_probe,
     column_arguments,
     composition_arguments,
+    division_arguments,
     video_paths,
 )
 
@@ -283,20 +284,24 @@ def media(tmp_path):
     return clips
 
 
+@pytest.mark.parametrize("direct", [False, True])
 def test_render_column_positions_order_center_fill_and_final_frame_hold(
-    media, tmp_path
+    media, tmp_path, direct
 ):
     red, green, blue, yellow = media
     tracks = [[red, yellow], [green], [blue]]
     output = tmp_path / "assembled.mp4"
     config = RenderConfig(column_width=64, height=120, encoder="libx264")
-    columns = []
-    for index, track in enumerate(tracks):
-        path = tmp_path / f"column{index}.mp4"
-        columns.append(path)
-        args = column_arguments(track, path, tmp_path / f"column{index}.txt", config)
-        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
-    args = composition_arguments(columns, 1.2, output, tmp_path / "graph.txt", config)
+    if direct:
+        args = division_arguments(tracks, 1.2, output, tmp_path / "graph.txt", config, {})
+    else:
+        columns = []
+        for index, track in enumerate(tracks):
+            path = tmp_path / f"column{index}.mp4"
+            columns.append(path)
+            args = column_arguments(track, path, tmp_path / f"column{index}.txt", config)
+            subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+        args = composition_arguments(columns, 1.2, output, tmp_path / "graph.txt", config)
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     result = subprocess.run(
         [
@@ -361,9 +366,9 @@ def test_render_column_positions_order_center_fill_and_final_frame_hold(
     assert output.read_bytes() == existing
 
 
-@pytest.mark.parametrize("combine", [True, False])
+@pytest.mark.parametrize("combine, interim", [(True, True), (False, True), (True, False)])
 def test_gui_import_and_full_resolution_export(
-    media, tmp_path, qtbot, monkeypatch, combine
+    media, tmp_path, qtbot, monkeypatch, combine, interim
 ):
     from fastvideoassembly import app
 
@@ -374,6 +379,7 @@ def test_gui_import_and_full_resolution_export(
     qtbot.addWidget(controller.window)
     controller.window.show()
     controller.combine.setChecked(combine)
+    controller.assembler.render_timelines.setChecked(interim)
     controller.add_paths([clip.path for clip in media])
     qtbot.waitUntil(lambda: not controller.loading, timeout=30000)
     assert len(controller.clips) == 4
@@ -409,7 +415,7 @@ def test_gui_import_and_full_resolution_export(
     assert stream["codec_name"] == "hevc"
     assert stream["pix_fmt"] == "yuv420p10le"
     for name in ("A", "B", "C"):
-        assert output.with_name(f"gui-output_{name}.mp4").stat().st_size > 0
+        assert output.with_name(f"gui-output_{name}.mp4").exists() == interim
     assert controller.export_directory is None
 
 
@@ -493,7 +499,8 @@ def test_stop_removes_graphs_and_does_not_start_next_timeline(
 
 
 @pytest.mark.parametrize("mode", ["None", "True Peak", "YouTube"])
-def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mode):
+@pytest.mark.parametrize("direct", [False, True])
+def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mode, direct):
     from fastvideoassembly.audio import peak_measurement_arguments
 
     source = tmp_path / "delayed.mp4"
@@ -540,13 +547,19 @@ def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mo
     )
     output = tmp_path / "offset_A.mp4"
     # The preceding video has no audio, followed by a clip with delayed audio.
-    args = column_arguments(
-        [Clip(source, 1.1, 60, 120, False), clip],
-        output,
-        tmp_path / "offset.ffgraph",
-        config,
-        {source: peak},
-    )
+    track = [Clip(source, 1.1, 60, 120, False), clip]
+    if direct:
+        mix_peak = None
+        if mode == "True Peak":
+            measurement = subprocess.run([
+                "ffmpeg", *division_arguments([track] * 3, 3.1, output, tmp_path / "mix.ffgraph",
+                                              config, {source: peak}, measure=True),
+            ], check=True, capture_output=True, text=True).stderr
+            mix_peak = float(json.loads(measurement[measurement.rindex("{"):measurement.rindex("}") + 1])["input_tp"])
+        args = division_arguments([track] * 3, 3.1, output, tmp_path / "offset.ffgraph",
+                                  config, {source: peak}, peak=mix_peak)
+    else:
+        args = column_arguments(track, output, tmp_path / "offset.ffgraph", config, {source: peak})
     subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
     samples = np.frombuffer(
         subprocess.run(

@@ -178,11 +178,19 @@ has its own combined output: `_FINAL_ABC` and `_FINAL_DEF` with three columns,
 or `_FINAL_ABCD` and `_FINAL_EFGH` with four. A single division retains `_FINAL`.
 Each division and its optional final finish before the next division starts;
 all target filenames are checked before rendering begins.
+**Render interim timelines** is on by default. Uncheck it to encode each division
+straight from its source clips into its own final file, without saving timeline
+media. Keep **Create final assembly** checked for this mode; Render is disabled
+when neither output option is selected. Normalization, clip timing, and final-frame
+holds are preserved. True Peak still measures sources, then measures the normalized
+source audio mix before the single video render. Divisions remain separate files.
+**Delete timelines after final render** is disabled when interim rendering is off.
+
 **Delete timelines after final render** is off by default. When enabled, each completed
 final deletes only its own rendered timeline files. Failed or stopped finals
 retain their timeline files. Source videos are never deleted. The option is disabled
 when final creation is unchecked.
-When checked, a final pass stacks the columns, inheriting the render settings
+With interim rendering enabled, a final pass stacks the columns, inheriting the render settings
 without resizing. Shorter columns hold their last frame. This final stage is
 another encode, not stream copy. There is no automatic reuse of prior outputs.
 
@@ -193,7 +201,7 @@ timelines, an existing unused final file does not block the job. Outputs not lis
 in the replacement dialog retain FFmpeg's no-overwrite protection.
 Stop rendering sends FFmpeg its normal quit command, retains completed and
 partial files, and does not start later stages. Process diagnostics and exit
-codes remain visible. Each timeline is encoded in one FFmpeg process directly
+codes remain visible. With interim rendering enabled, each timeline is encoded in one FFmpeg process directly
 from its original source clips, with no per-clip temporary video or audio files.
 The filter graph crops, scales, aligns frame boundaries, normalizes audio,
 and concatenates the clips before encoding the timeline output once.

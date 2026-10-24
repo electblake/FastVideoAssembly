@@ -1748,15 +1748,16 @@ def test_divisions_balance_display_selection_and_settings(controller, tmp_path, 
     assert [timeline_name(i) for i in [0, 25, 26, 27, 299]] == ['A', 'Z', 'AA', 'AB', 'KN']
 
 
-@pytest.mark.parametrize('combine', [False, True])
+@pytest.mark.parametrize('combine, render_timelines', [(False, True), (True, True), (True, False)])
 @pytest.mark.parametrize('audio_codec', ['none', 'aac'])
 @pytest.mark.parametrize('columns', [3, 4])
-def test_two_divisions_render_independent_triples(controller, preview_source, tmp_path, qtbot, monkeypatch, combine, audio_codec, columns):
+def test_two_divisions_render_independent_triples(controller, preview_source, tmp_path, qtbot, monkeypatch, combine, render_timelines, audio_codec, columns):
     import json
 
     controller.assembler.divisions.setValue(2)
     controller.assembler.columns.setCurrentText(str(columns))
     controller.combine.setChecked(combine)
+    controller.assembler.render_timelines.setChecked(render_timelines)
     config = RenderConfig(column_width=60, height=120, encoder='libx264', speed='fast', normalization='True Peak', audio_codec=audio_codec)
     monkeypatch.setattr(controller, 'render_config', lambda: config)
     clips = []
@@ -1765,16 +1766,32 @@ def test_two_divisions_render_independent_triples(controller, preview_source, tm
         path.hardlink_to(preview_source)
         clips.append(Clip(path, 0.5 + i / 10, 60, 120, True))
     controller.assembler.tracks = [[clip] for clip in clips]
+    letters = 'ABCDEFGH'[:columns * 2]
+    first, second = letters[:columns], letters[columns:]
+    first_final = tmp_path / f'division_FINAL_{first}.mp4'
+    second_paths = {clip.path for clip in clips[columns:]}
+    second_paths.update(tmp_path / f'division_{letter}.mp4' for letter in second)
+    second_paths.add(tmp_path / f'division_FINAL_{second}.mp4')
+    second_division_jobs = []
+    start_job = controller.start_export_job
+
+    def inspect_start():
+        path, _, _ = controller.export_jobs[controller.export_index]
+        if combine and path in second_paths:
+            assert first_final.stat().st_size > 0
+            second_division_jobs.append(path)
+        start_job()
+
+    monkeypatch.setattr(controller, 'start_export_job', inspect_start)
     controller.start_export(tmp_path / 'division.mp4')
     assert not controller.assembler.divisions.isEnabled()
     assert not controller.assembler.columns.isEnabled()
-    letters = 'ABCDEFGH'[:columns * 2]
-    first, second = letters[:columns], letters[columns:]
-    expected_groups = list(first) + ([f'FINAL {first}'] if combine else []) + list(second) + ([f'FINAL {second}'] if combine else [])
+    expected_groups = (list(first) if render_timelines else []) + ([f'FINAL {first}'] if combine else []) + (list(second) if render_timelines else []) + ([f'FINAL {second}'] if combine else [])
     assert [group[0] for group in controller.export_groups] == expected_groups
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.process.exitCode() == 0
-    outputs = list(letters) + ([f'FINAL_{first}', f'FINAL_{second}'] if combine else [])
+    assert bool(second_division_jobs) == combine
+    outputs = (list(letters) if render_timelines else []) + ([f'FINAL_{first}', f'FINAL_{second}'] if combine else [])
     assert {p.stem for p in tmp_path.glob('division_*.mp4')} == {f'division_{suffix}' for suffix in outputs}
     for suffix in outputs:
         data = json.loads(subprocess.run(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(tmp_path / f'division_{suffix}.mp4')], capture_output=True, text=True, check=True).stdout)
@@ -2262,3 +2279,63 @@ def test_organize_all_never_redistributes_manual_timelines(controller, tmp_path)
             assert track == sorted(original, key=lambda clip: clip.duration, reverse=reverse)
     controller.assembler.select_none_button.click()
     assert controller.assembler.clips_group.title() == "Clips (0)"
+
+
+def test_interim_checkbox_persistence_and_output_selection(controller, tmp_path, qtbot):
+    from fastvideoassembly.app import Application
+
+    interim = controller.assembler.render_timelines
+    assert interim.text() == "Render interim timelines"
+    assert interim.isChecked()
+    options = controller.assembler.layout().itemAt(controller.assembler.layout().count() - 3).layout()
+    assert options.itemAtPosition(1, 0).widget() is interim
+    assert options.itemAtPosition(2, 0).widget() is controller.assembler.remove_timelines
+    controller.assembler.tracks = [[Clip(tmp_path / "source.mp4", 1, 60, 120)]] * 3
+    controller.combine.setChecked(True)
+    controller.assembler.remove_timelines.setChecked(True)
+    interim.setChecked(False)
+    assert not controller.assembler.remove_timelines.isEnabled()
+    assert controller.assembler.export_button.isEnabled()
+    controller.combine.setChecked(False)
+    assert not controller.assembler.export_button.isEnabled()
+    controller.combine.setChecked(True)
+    restored = Application()
+    qtbot.addWidget(restored.window)
+    assert not restored.assembler.render_timelines.isChecked()
+    controller.running = True
+    controller.update_enabled()
+    assert not interim.isEnabled()
+    controller.running = False
+    controller.update_enabled()
+    assert interim.isEnabled()
+
+
+@pytest.mark.parametrize("normalization", ["None", "YouTube", "True Peak"])
+def test_direct_division_preserves_existing_interims(controller, preview_source, tmp_path, qtbot, monkeypatch, normalization):
+    import json
+
+    controller.assembler.render_timelines.setChecked(False)
+    controller.assembler.remove_timelines.setChecked(True)
+    controller.combine.setChecked(True)
+    config = RenderConfig(column_width=60, height=120, encoder="libx264", normalization=normalization)
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+    # Repeated sources share one measurement; the silent segment needs no source audio.
+    audible = Clip(preview_source, 0.5, 60, 120, True)
+    silent = Clip(preview_source, 0.2, 60, 120, False)
+    controller.assembler.tracks = [[audible, silent, audible], [audible], [silent, audible]]
+    controller.analysis_workers.setValue(8)
+    for letter in "ABC":
+        (tmp_path / f"direct_{letter}.mp4").write_bytes(b"existing interim")
+    controller.start_export(tmp_path / "direct.mp4")
+    qtbot.waitUntil(lambda: not controller.running, timeout=60000)
+    assert controller.process.exitCode() == 0
+    assert len(controller.export_jobs) == (3 if normalization == "True Peak" else 1)
+    assert len(controller.audio_peaks) == (2 if normalization == "True Peak" else 0)
+    for letter in "ABC":
+        assert (tmp_path / f"direct_{letter}.mp4").read_bytes() == b"existing interim"
+    data = json.loads(subprocess.run([
+        "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json",
+        str(tmp_path / "direct_FINAL.mp4"),
+    ], capture_output=True, text=True, check=True).stdout)
+    assert [stream["codec_type"] for stream in data["streams"]] == ["video", "audio"]
+    assert float(data["format"]["duration"]) == pytest.approx(1.2, abs=0.06)

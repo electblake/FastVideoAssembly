@@ -307,3 +307,76 @@ def composition_arguments(columns, duration, output, graph_path, config, peak=No
         + config.encoding_arguments()
         + [str(output)]
     )
+
+
+def division_arguments(tracks, duration, output, graph_path, config, peaks, peak=None, measure=False):
+    """Normalize source timelines and compose a division without intermediate media."""
+    args = ["-hide_banner", "-n", "-filter_complex_threads", str(config.filter_threads)]
+    if not measure:
+        args += config.hardware_arguments(scaling=True)
+    filters = []
+    index = 0
+    audio = config.audio_codec != "none"
+    for column, track in enumerate(tracks):
+        inputs = []
+        for clip in track:
+            length = clip_duration(clip, config)
+            if not measure:
+                args += config.decoding_arguments(scaling=True)
+            args += ["-threads", "1", "-t", str(length), "-i", str(clip.path)]
+            if not measure:
+                filters.append(
+                    f"[{index}:v:0]setpts=PTS-STARTPTS,"
+                    f"{config.decoded_frames_filter(scaling=True)}{config.scaling_filter()}"
+                    f"crop={config.column_width}:{config.height}:(iw-ow)/2:(ih-oh)/2,"
+                    f"fps={config.fps}:start_time=0,format={config.pixel_format},setsar=1,"
+                    f"tpad=stop_mode=clone:stop_duration={length},trim=duration={length},"
+                    f"setpts=PTS-STARTPTS[v{index}]"
+                )
+                inputs.append(f"[v{index}]")
+            if audio:
+                if clip.has_audio:
+                    source_peak = peaks[clip.path] if config.normalization == "True Peak" else None
+                    filters.append(
+                        f"[{index}:a:0]aresample=48000:async=1:first_pts=0,"
+                        "aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                        f"atrim=duration={clip.duration},{normalization_filter(config.normalization, source_peak)},"
+                        f"apad=whole_dur={length},atrim=duration={length},asetpts=PTS-STARTPTS[a{index}]"
+                    )
+                else:
+                    filters.append(
+                        "anullsrc=r=48000:cl=stereo,"
+                        f"atrim=duration={length},asetpts=PTS-STARTPTS[a{index}]"
+                    )
+                inputs.append(f"[a{index}]")
+            index += 1
+        filters.append(
+            "".join(inputs) + f"concat=n={len(track)}:v={int(not measure)}:a={int(audio)}"
+            + (f"[vcolumn{column}]" if not measure else "")
+            + (f"[acolumn{column}]" if audio else "")
+        )
+        if not measure:
+            # Concat uses microsecond timestamps; align columns to a shared frame clock.
+            filters.append(
+                f"[vcolumn{column}]fps={config.fps}:start_time=0,"
+                f"tpad=stop_mode=clone:stop_duration={duration},trim=duration={duration}[column{column}]"
+            )
+    if not measure:
+        filters.append("".join(f"[column{i}]" for i in range(len(tracks)))
+                       + f"hstack=inputs={len(tracks)}[output]")
+    if audio:
+        normalize = ("loudnorm=I=-14:TP=-1:LRA=50:linear=false:print_format=json" if measure
+                     else normalization_filter(config.normalization, peak))
+        filters.append(
+            "".join(f"[acolumn{i}]" for i in range(len(tracks)))
+            + f"amix=inputs={len(tracks)}:duration=longest:dropout_transition=0:normalize=1,"
+            f"atrim=duration={duration},{normalize}"
+            + ("[audio]" if measure else f",apad=whole_dur={duration},atrim=duration={duration}[audio]")
+        )
+    Path(graph_path).write_text(";\n".join(filters), encoding="utf-8")
+    args += ["-/filter_complex", str(graph_path)]
+    if measure:
+        return args + ["-map", "[audio]", "-vn", "-progress", "pipe:1", "-nostats", "-f", "null", "-"]
+    return (args + ["-map", "[output]", "-t", str(duration)]
+            + (["-map", "[audio]"] if audio else [])
+            + config.encoding_arguments() + [str(output)])

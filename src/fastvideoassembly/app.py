@@ -61,6 +61,7 @@ from .assembly import (
     clip_from_probe,
     column_arguments,
     composition_arguments,
+    division_arguments,
     timeline_name,
     video_paths,
 )
@@ -1050,13 +1051,16 @@ class Application(QObject):
         self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
         self.assembler.scan_stop_button.setEnabled(self.loading and not self.scan_stop_requested)
-        self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks))
+        self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks)
+                                                and (self.combine.isChecked() or self.assembler.render_timelines.isChecked()))
         self.assembler.pause_button.setEnabled(self.running)
         self.assembler.pause_button.setText("Resume" if self.render_paused else "Pause")
         self.assembler.stop_button.setEnabled(self.running)
         self.render_panel.setEnabled(idle)
         self.combine.setEnabled(idle)
-        self.assembler.remove_timelines.setEnabled(idle and self.combine.isChecked())
+        self.assembler.render_timelines.setEnabled(idle)
+        self.assembler.remove_timelines.setEnabled(idle and self.combine.isChecked()
+                                                  and self.assembler.render_timelines.isChecked())
         self.audio_panel.setEnabled(idle)
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
@@ -1103,7 +1107,8 @@ class Application(QObject):
                 for start in range(0, count, columns_per_division)
             ])
         ]
-        targets = columns + (finals if self.combine.isChecked() else [])
+        render_timelines = self.assembler.render_timelines.isChecked()
+        targets = (columns if render_timelines else []) + (finals if self.combine.isChecked() else [])
         existing = [path for path in targets if path.exists()]
         self.replace_outputs = set()
         if existing:
@@ -1136,6 +1141,7 @@ class Application(QObject):
         scheduled_measurements = set()
         self.column_cleanup = {}
         for division_start in range(0, count, columns_per_division):
+            division_group_start = len(self.export_jobs)
             for index in range(division_start, division_start + columns_per_division):
                 track, path = self.assembler.tracks[index], columns[index]
                 group_start = len(self.export_jobs)
@@ -1152,36 +1158,38 @@ class Application(QObject):
                             (clip.path, clip.duration, peak_measurement_arguments(clip))
                         )
                         scheduled_measurements.add(clip.path)
-                self.column_cleanup[len(self.export_jobs)] = [graph_path]
-                self.export_jobs.append((
-                    path, durations[index],
-                    partial(column_arguments, track, path, graph_path, config, self.audio_peaks),
-                ))
-                self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
+                if render_timelines:
+                    self.column_cleanup[len(self.export_jobs)] = [graph_path]
+                    self.export_jobs.append((
+                        path, durations[index],
+                        partial(column_arguments, track, path, graph_path, config, self.audio_peaks),
+                    ))
+                    self.export_groups.append((timeline_name(index), group_start, len(self.export_jobs)))
             if self.combine.isChecked():
                 output = finals[division_start // columns_per_division]
                 group_columns = columns[division_start:division_start + columns_per_division]
                 duration = max(durations[division_start:division_start + columns_per_division])
-                group_start = len(self.export_jobs)
+                group_start = len(self.export_jobs) if render_timelines else division_group_start
+                group_tracks = self.assembler.tracks[division_start:division_start + columns_per_division]
+                graph_path = graph_root / f"composition{division_start // columns_per_division}.ffgraph"
                 if config.audio_codec != "none" and config.normalization == "True Peak":
                     self.measurement_keys[len(self.export_jobs)] = output
                     self.export_jobs.append(
                         (
                             output,
                             duration,
-                            mix_peak_arguments(group_columns, duration),
+                            mix_peak_arguments(group_columns, duration) if render_timelines else partial(
+                                division_arguments, group_tracks, duration, output,
+                                graph_root / f"mix{division_start}.ffgraph", config, self.audio_peaks, measure=True,
+                            ),
                         )
                     )
-                args = partial(
-                    composition_arguments,
-                    group_columns,
-                    duration,
-                    output,
-                    graph_root / f"composition{division_start // columns_per_division}.ffgraph",
-                    config,
-                )
+                if render_timelines:
+                    args = partial(composition_arguments, group_columns, duration, output, graph_path, config)
+                else:
+                    args = partial(division_arguments, group_tracks, duration, output, graph_path, config, self.audio_peaks)
                 self.export_jobs.append((output, duration, args))
-                if self.assembler.remove_timelines.isChecked():
+                if render_timelines and self.assembler.remove_timelines.isChecked():
                     self.column_cleanup[len(self.export_jobs) - 1] = group_columns
                 self.export_groups.append(("FINAL" if count == columns_per_division else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + columns_per_division)), group_start, len(self.export_jobs)))
         self.export_index = 0
@@ -1213,9 +1221,9 @@ class Application(QObject):
         self.measuring_audio = measuring
         self.audio_items_processed = 0
         self.audio_analysis_started = monotonic()
-        if callable(args):
+        if callable(args) and not measuring:
             if (
-                args.func is composition_arguments
+                args.func in (composition_arguments, division_arguments)
                 and self.render_config().audio_codec != "none"
                 and self.render_config().normalization == "True Peak"
             ):
@@ -1243,6 +1251,10 @@ class Application(QObject):
             if index not in self.measurement_keys:
                 break
             path, _duration, args = self.export_jobs[index]
+            if index > self.export_index and (callable(args) or callable(self.export_jobs[self.export_index][2])):
+                break
+            if callable(args):
+                args = args()
             process = QProcess(self)
             self.measurement_processes[process] = [index, "", ""]
             self.measurement_seconds[index] = 0.0

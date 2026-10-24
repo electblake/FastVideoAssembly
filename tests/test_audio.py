@@ -118,7 +118,8 @@ def test_normalization_levels_and_silence(mode, tmp_path):
 
 @pytest.mark.parametrize("mode", ["True Peak", "YouTube"])
 @pytest.mark.parametrize("count", [3, 4])
-def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch, count):
+@pytest.mark.parametrize("interim", [False, True])
+def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch, count, interim):
     source = tmp_path / "source.mp4"
     subprocess.run(
         [
@@ -201,6 +202,7 @@ def test_column_and_final_normalization(mode, tmp_path, qtbot, monkeypatch, coun
     )
     controller = app.Application()
     qtbot.addWidget(controller.window)
+    controller.assembler.render_timelines.setChecked(interim)
     controller.normalization.setCurrentText(mode)
     controller.assembler.columns.setCurrentText(str(count))
     monkeypatch.setattr(controller, "render_config", lambda: config)
