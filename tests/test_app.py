@@ -222,7 +222,7 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
     monkeypatch.setattr(app, "monotonic", lambda: clock[0])
     controller.export_jobs = [(tmp_path / f"step{i}.mp4", 100, []) for i in range(5)]
     controller.export_groups = [("A", 0, 2), ("B", 2, 4), ("FINAL", 4, 5)]
-    controller.measurement_keys = {0: tmp_path / "audio.mp4"}
+    controller.measurement_keys = {}
     controller.export_index = 0
     controller.start_export_job()
     assert "ETA --:--:--" in controller.progress.text()
@@ -566,10 +566,14 @@ def test_preview_play_pause_scrub_and_stop(controller, preview_source, qtbot):
     )
     controller.preview.play_button.click()
     assert player.playbackState() == QMediaPlayer.PlaybackState.PausedState
+    assert "Preview paused" in controller.log.toPlainText()
+    assert controller.window.statusBar().currentMessage() == "Preview paused"
     controller.preview.scrubber.setValue(1500)
     qtbot.waitUntil(lambda: abs(player.position() - 1500) < 100, timeout=5000)
     controller.preview.stop_button.click()
     assert player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
+    assert "Preview stopped" in controller.log.toPlainText()
+    assert controller.window.statusBar().currentMessage() == "Preview stopped"
     assert player.position() == 0
     assert (
         controller.preview_dock.geometry().top()
@@ -710,8 +714,12 @@ def test_scan_pause_stop_retains_progress(
     controller.assembler.create_button.click()
     if action == "stop_active":
         controller.assembler.scan_stop_button.click()
+        assert "Stopping scanning after active scans finish" in controller.log.toPlainText()
+        assert controller.window.statusBar().currentMessage() == "Stopping scanning after active scans finish"
     else:
         controller.assembler.scan_pause_button.click()
+        assert "Pausing scanning after active scans finish" in controller.log.toPlainText()
+        assert controller.window.statusBar().currentMessage() == "Pausing scanning after active scans finish"
         assert controller.assembler.scan_pause_button.text() == "Resume"
     qtbot.waitUntil(lambda: not controller.probing_paths, timeout=15000)
     assert parse.call_count == 2
@@ -721,10 +729,13 @@ def test_scan_pause_stop_retains_progress(
     assert controller.assembler.tracks == [[], [], []]
     if action == "resume":
         assert controller.loading
+        assert "Scanning paused" in controller.log.toPlainText()
         controller.assembler.scan_pause_button.click()
+        assert "Resuming scanning" in controller.log.toPlainText()
     else:
         if action == "stop_paused":
             controller.assembler.scan_stop_button.click()
+        assert "Scanning stopped" in controller.log.toPlainText()
         assert not controller.loading
         assert controller.assembler.create_button.isEnabled()
         controller.assembler.create_button.click()
@@ -757,7 +768,12 @@ def test_render_pause_resume_retains_jobs(
     monkeypatch.setattr(controller, "start_export_job", record_start)
     controller.start_export(tmp_path / "paused.mp4")
     controller.assembler.pause_button.click()
+    assert "Pausing after active work finishes" in controller.log.toPlainText()
+    controller.runtime_timer.timeout.emit()
+    assert controller.window.statusBar().currentMessage() == "Pausing after active work finishes"
     qtbot.waitUntil(lambda: controller.render_waiting, timeout=15000)
+    assert "Rendering paused" in controller.log.toPlainText()
+    assert controller.window.statusBar().currentMessage() == "Rendering paused"
     temporary = Path(controller.export_directory.name)
     assert temporary.exists()
     assert controller.export_jobs[0][0].exists()
@@ -769,12 +785,13 @@ def test_render_pause_resume_retains_jobs(
     assert not controller.assembler.create_button.isEnabled()
     assert controller.process.state() == app.QProcess.ProcessState.NotRunning
     if stop:
-        log_before_stop = controller.log.toPlainText()
         controller.assembler.stop_button.click()
-        assert controller.log.toPlainText() == log_before_stop
+        assert "Stop requested. Waiting for active work to exit" in controller.log.toPlainText()
+        assert "Rendering stopped" in controller.log.toPlainText()
         assert jobs == [0]
     else:
         controller.assembler.pause_button.click()
+        assert "Resuming work" in controller.log.toPlainText()
         qtbot.waitUntil(lambda: not controller.running, timeout=30000)
         assert jobs == list(range(len(controller.export_jobs)))
         assert all((tmp_path / f"paused_{name}.mp4").exists() for name in "ABC")
@@ -1069,7 +1086,8 @@ def test_audio_progress_tracks_timestamps_and_stalled_activity(controller, tmp_p
     controller.measurement_keys = {i: job[0] for i, job in enumerate(controller.export_jobs)}
     controller.export_index = 0
     controller.start_export_job()
-    assert "Waiting for audio progress" in controller.window.statusBar().currentMessage()
+    assert controller.progress.maximum() == 0
+    assert controller.window.statusBar().currentMessage() == "Measuring audio - audio0.mp4"
     clock[0] = 102.0
     workers[0].readAllStandardOutput.return_value = b"out_time_us=2000"
     controller.read_measurement(workers[0])
@@ -1078,10 +1096,9 @@ def test_audio_progress_tracks_timestamps_and_stalled_activity(controller, tmp_p
     controller.read_measurement(workers[0])
     value = controller.progress.value()
     assert value == 200 // worker_count
-    assert "10.0 audio s/s avg" in controller.progress.text()
+    assert controller.progress.text() == f"FINAL - Measuring audio - {20 // worker_count}%"
     status = controller.window.statusBar().currentMessage()
-    assert f"Audio 20.0 / {worker_count * 100:.1f} s" in status
-    assert f"Batch 0/{worker_count} complete, {worker_count} active" in status
+    assert status == "Measuring audio - audio0.mp4"
     assert "Measured audio audio0.mp4: 20.0 / 100.0 s" in controller.log.toPlainText()
     log = controller.log.toPlainText()
     clock[0] = 107.0
@@ -1089,12 +1106,12 @@ def test_audio_progress_tracks_timestamps_and_stalled_activity(controller, tmp_p
     controller.read_measurement(workers[0])
     controller.runtime_timer.timeout.emit()
     assert controller.progress.value() == value
-    assert "Last audio advance 5 s ago" in controller.window.statusBar().currentMessage()
+    assert controller.window.statusBar().currentMessage() == status
     assert controller.log.toPlainText() == log
     workers[0].readAllStandardOutput.return_value = b"out_time_us=30000000\n"
     controller.read_measurement(workers[0])
     assert "Measured audio audio0.mp4: 30.0 / 100.0 s" in controller.log.toPlainText()
-    assert "Last audio advance 0 s ago" in controller.window.statusBar().currentMessage()
+    assert controller.window.statusBar().currentMessage() == status
     controller.runtime_timer.stop()
 
 
@@ -1119,27 +1136,36 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
     controller.start_export(tmp_path / "parallel.mp4")
     assert len(controller.measurement_processes) == 2
     assert factory.call_count == 2
-    assert controller.progress.text().endswith(" - 0.0 audio s/s avg")
+    assert controller.progress.maximum() == 0
     clock[0] = 102.0
     controller.pause_export()
+    assert "Pausing after active work finishes" in controller.log.toPlainText()
+    controller.runtime_timer.timeout.emit()
+    assert controller.window.statusBar().currentMessage() == "Pausing after active work finishes"
     if outcome == "stop":
         controller.stop_export()
+        assert "Stop requested. Waiting for active work to exit" in controller.log.toPlainText()
         for worker in workers[:2]:
-            worker.write.assert_called_once_with(b"q\n")
+            worker.kill.assert_called_once_with()
+            worker.write.assert_not_called()
     workers[1].readAllStandardOutput.return_value = b"out_time_us=500000\n"
     controller.read_measurement(workers[1])
+    assert controller.window.statusBar().currentMessage() == (
+        "Stop requested. Waiting for active work to exit" if outcome == "stop"
+        else "Pausing after active work finishes"
+    )
     assert controller.progress.value() == 83
     workers[1].readAllStandardOutput.return_value = b""
     workers[1].readAllStandardError.return_value = b'{"input_tp": "-6.0"}'
     controller.measurement_finished(workers[1], 1 if outcome == "failure" else 0, None)
-    assert controller.progress.text().endswith(" - 0.5 audio s/s avg" if outcome in ("resume", "failure_first") else " - 0.2 audio s/s avg")
+    assert "audio s/s" not in controller.progress.text()
     assert controller.running
     assert controller.export_index == 0
     workers[0].readAllStandardError.return_value = b'{"input_tp": "-3.0"}'
     controller.measurement_finished(workers[0], 1 if outcome == "failure_first" else 0, None)
     assert not controller.measurement_processes
     if outcome == "resume":
-        assert controller.progress.text().endswith(" - 1.0 audio s/s avg")
+        assert "audio s/s" not in controller.progress.text()
         assert controller.render_waiting
         assert not controller.runtime_timer.isActive()
         assert controller.export_index == 2
@@ -1147,7 +1173,7 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
         controller.pause_export()
         assert len(controller.measurement_processes) == 1
         assert factory.call_count == 3
-        assert controller.progress.text().endswith(" - 0.0 audio s/s avg")
+        assert controller.progress.maximum() == 0
         controller.stop_export()
         controller.measurement_finished(workers[2], 0, None)
     assert not controller.running
@@ -1156,6 +1182,55 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
         assert "code 1" in controller.window.statusBar().currentMessage()
         failed_path = tmp_path / ("0.mp4" if outcome == "failure_first" else "1.mp4")
         assert controller.window.statusBar().currentMessage().endswith(str(failed_path))
+
+
+@pytest.mark.parametrize("worker_count", [1, 2])
+@pytest.mark.parametrize("when", ["starting", "processing"])
+def test_stop_kills_audio_workers_without_stdin(controller, tmp_path, qtbot, monkeypatch, worker_count, when):
+    import tempfile
+
+    # Disable FFmpeg's interactive input so writing q cannot stop these workers.
+    args = [
+        "-nostdin", "-hide_banner", "-re", "-f", "lavfi", "-i",
+        "sine=frequency=440:sample_rate=48000:duration=60",
+        "-af", "loudnorm=print_format=json", "-progress", "pipe:1",
+        "-nostats", "-f", "null", "-",
+    ]
+    controller.analysis_workers.setValue(worker_count)
+    controller.export_jobs = [
+        (tmp_path / f"audio{i}.mp4", 60, (lambda: args) if worker_count == 1 else args)
+        for i in range(worker_count)
+    ] + [(tmp_path / "next.mp4", 60, [])]
+    controller.export_groups = [("FINAL", 0, len(controller.export_jobs))]
+    controller.measurement_keys = {i: job[0] for i, job in enumerate(controller.export_jobs[:-1])}
+    controller.export_index = 0
+    controller.export_directory = tempfile.TemporaryDirectory(dir=tmp_path)
+    temporary = Path(controller.export_directory.name)
+    controller.column_cleanup = {}
+    controller.audio_peaks = {}
+    controller.normalization_cache = {"existing": "-6.0"}
+    controller.running = True
+    render = Mock()
+    monkeypatch.setattr(controller.process, "start", render)
+    controller.update_enabled()
+    controller.start_export_job()
+    exits = [Mock() for _ in controller.measurement_processes]
+    for process, exited in zip(controller.measurement_processes, exits):
+        process.finished.connect(exited)
+    if when == "processing":
+        qtbot.waitUntil(lambda: all(value > 0 for value in controller.measurement_seconds.values()), timeout=10000)
+    controller.assembler.stop_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=5000)
+    assert not controller.measurement_processes
+    assert all(exited.call_count == 1 for exited in exits)
+    assert not controller.runtime_timer.isActive()
+    assert controller.export_directory is None
+    assert not temporary.exists()
+    assert controller.audio_peaks == {}
+    assert controller.normalization_cache == {"existing": "-6.0"}
+    assert controller.output_panel.isEnabled()
+    assert "stopped" in controller.window.statusBar().currentMessage()
+    render.assert_not_called()
 
 
 def test_parallel_true_peak_export(controller, preview_source, tmp_path, qtbot, monkeypatch):
@@ -1173,6 +1248,36 @@ def test_parallel_true_peak_export(controller, preview_source, tmp_path, qtbot, 
     assert controller.process.exitCode() == 0
     assert set(controller.audio_peaks) == {clip.path for clip in clips} | {tmp_path / "parallel_FINAL.mp4"}
     assert (tmp_path / "parallel_FINAL.mp4").exists()
+
+
+@pytest.mark.parametrize("normalization", ["None", "True Peak", "YouTube"])
+def test_segmented_export_keeps_continuous_audio(controller, preview_source, tmp_path, qtbot, monkeypatch, normalization):
+    import numpy as np
+
+    from fastvideoassembly.assembly import division_arguments
+
+    config = RenderConfig(column_width=64, height=120, encoder="libx264", speed="fast",
+                          normalization=normalization)
+    monkeypatch.setattr(controller, "render_config", lambda: config)
+    controller.assembler.render_timelines.setChecked(False)
+    clip = Clip(preview_source, 0.2, 60, 120, True)
+    tracks = [[clip] * 20, [Clip(preview_source, 3, 60, 120, True)], [clip] * 18]
+    controller.assembler.tracks = tracks
+    controller.start_export(tmp_path / "segmented.mp4")
+    temporary = Path(controller.export_directory.name)
+    assert sum(path.suffix == ".nut" for path, _, _ in controller.export_jobs) > 1
+    qtbot.waitUntil(lambda: not controller.running, timeout=60000)
+    actual = tmp_path / "segmented_FINAL.mp4"
+    assert actual.exists(), controller.log.toPlainText()[-6000:]
+    assert not temporary.exists()
+    expected = tmp_path / "single.mp4"
+    peak = controller.audio_peaks[actual] if normalization == "True Peak" else None
+    args = division_arguments(tracks, 4, expected, tmp_path / "single.ffgraph", config, controller.audio_peaks, peak=peak)
+    subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    samples = [np.frombuffer(subprocess.run([
+        "ffmpeg", "-v", "error", "-i", str(path), "-vn", "-f", "f32le", "-"
+    ], check=True, capture_output=True).stdout, dtype="<f4") for path in (expected, actual)]
+    np.testing.assert_allclose(samples[0], samples[1], atol=1e-5)
 
 def test_click_current_clip_toggles_source_multi_selection(controller, tmp_path, qtbot, monkeypatch):
     monkeypatch.setattr(controller.preview, "set_clip", Mock())

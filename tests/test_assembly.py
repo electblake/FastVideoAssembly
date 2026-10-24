@@ -14,6 +14,9 @@ from fastvideoassembly.assembly import (
     column_arguments,
     composition_arguments,
     division_arguments,
+    division_segment_arguments,
+    division_segments,
+    join_division_arguments,
     video_paths,
 )
 
@@ -556,6 +559,7 @@ def test_source_audio_offset_survives_silent_clip_and_normalization(tmp_path, mo
                                               config, {source: peak}, measure=True),
             ], check=True, capture_output=True, text=True).stderr
             mix_peak = float(json.loads(measurement[measurement.rindex("{"):measurement.rindex("}") + 1])["input_tp"])
+            assert mix_peak == pytest.approx(-1.0, abs=0.2)
         args = division_arguments([track] * 3, 3.1, output, tmp_path / "offset.ffgraph",
                                   config, {source: peak}, peak=mix_peak)
     else:
@@ -596,3 +600,55 @@ def test_balancing_many_timelines_keeps_each_source_once(track_count):
     assert len(tracks) == track_count
     assert all(len(track) == 2 for track in tracks)
     assert {clip for track in tracks for clip in track} == set(clips)
+
+
+@pytest.mark.parametrize("fps", ["30", "30000/1001"])
+def test_segmented_division_preserves_frames_and_short_column_hold(media, tmp_path, fps):
+    from fractions import Fraction
+
+    red, _green, _blue, yellow = media
+    moving = tmp_path / "moving.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc2=s=60x120:r=24000/1001:d=5", "-c:v", "libx264", str(moving)],
+                   check=True, capture_output=True)
+    tracks = [[red, yellow] * 7, [Clip(moving, 5, 60, 120)], [Clip(moving, 1.2, 60, 120)]]
+    config = RenderConfig(column_width=64, height=120, encoder="libx264", quality=0,
+                          audio_codec="none", fps=fps)
+    segments = division_segments(tracks, config)
+    assert len(segments) > 1
+    duration = float(segments[-1][1] / Fraction(fps))
+    expected = tmp_path / "single.mp4"
+    subprocess.run(["ffmpeg", *division_arguments(tracks, duration, expected,
+                   tmp_path / "single.ffgraph", config, {})], check=True, capture_output=True)
+    paths = []
+    for index, (start, end) in enumerate(segments):
+        path = tmp_path / f"segment{index}.nut"
+        paths.append(path)
+        args = division_segment_arguments(tracks, start, end, path, path.with_suffix(".ffgraph"), config, {})
+        subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    actual = tmp_path / "joined.mp4"
+    args = join_division_arguments(paths, tracks, duration, actual, tmp_path / "join.ffconcat", config, {})
+    assert args[args.index("-c:v") + 1] == "copy"
+    subprocess.run(["ffmpeg", *args], check=True, capture_output=True)
+    frames = [subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo",
+                             "-pix_fmt", "rgb24", "-"], check=True, capture_output=True).stdout
+              for path in (expected, actual)]
+    assert frames[0] == frames[1]
+
+
+def test_large_audio_graph_handles_long_quoted_paths(tmp_path):
+    source = tmp_path / ("长 name [source];,quote's " + "x" * 120 + ".wav")
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.05",
+                    str(source)], check=True, capture_output=True)
+    clip = Clip(source, 0.05, 60, 120, True)
+    tracks = [[clip] * 151 for _ in range(4)]
+    config = RenderConfig(normalization="True Peak")
+    duration = sum(clip_duration(c, config) for c in tracks[0])
+    args = division_arguments(tracks, duration, tmp_path / "unused.mp4", tmp_path / "large.ffgraph",
+                              config, {source: -18.0}, measure=True)
+    assert len(subprocess.list2cmdline(["ffmpeg", *args])) < 1000
+    assert "-i" not in args
+    result = subprocess.run(["ffmpeg", *args], check=True, capture_output=True, text=True)
+    assert "progress=end" in result.stdout
+    measured = json.loads(result.stderr[result.stderr.rindex("{"):result.stderr.rindex("}") + 1])
+    assert float(measured["input_tp"]) > -100

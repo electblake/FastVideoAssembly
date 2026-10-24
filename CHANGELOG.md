@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-24
+
 ### Added
 
 - Added `-Minimize` to both launchers to start minimized without taking focus.
@@ -10,6 +12,18 @@
 
 - Made `-NoProfile` skip all settings and session-state reads and writes, including temporary profile files.
 - Made tests use no-profile, minimized application instances by default; kept persistence tests in isolated temporary profiles.
+
+### Fixed
+
+- Moved direct final-mix audio inputs into filter-graph manifests so large projects no longer exceed Windows' command-line limit before FFmpeg starts.
+- Rendered large direct divisions in bounded, GPU-compatible compressed segments and joined video without re-encoding; mixed and normalized audio continuously across the full division.
+- Removed audio speed, batch, worker, inactivity, and runtime metrics; logged confirmed FFmpeg startup and real audio progress instead.
+- Terminated active audio-measurement workers directly when Stop was clicked, including parallel analysis and final-mix measurement, instead of waiting for FFmpeg to read an interactive quit command.
+- Preserved saved measurements, released processing controls, and prevented subsequent jobs from starting after audio cancellation.
+- Logged Pause, Resume, and Stop actions for scanning, processing, and preview playback, with status feedback and confirmation when processing paused or stopped.
+- Kept pending pause and stop requests visible during runtime and progress updates.
+- Honored scanning cancellation when the last active scan finished instead of automatically creating timelines.
+- Made Stop interrupt active video rendering directly as well as audio measurement.
 
 ## [0.7.1] - 2026-10-24
 

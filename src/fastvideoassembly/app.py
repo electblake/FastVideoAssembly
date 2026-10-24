@@ -6,6 +6,7 @@ import sys
 import tempfile
 from dataclasses import asdict
 from datetime import date
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 from string import Template
@@ -62,6 +63,9 @@ from .assembly import (
     column_arguments,
     composition_arguments,
     division_arguments,
+    division_segment_arguments,
+    division_segments,
+    join_division_arguments,
     timeline_name,
     video_paths,
 )
@@ -121,6 +125,7 @@ class Application(QObject):
         self.scanning_paused = False
         self.scan_stop_requested = False
         self.render_paused = False
+        self.stop_requested = False
         self.render_waiting = False
         self.selected_clip = None
         self.export_directory = None
@@ -315,6 +320,9 @@ class Application(QObject):
         self.log_dock.setWidget(process_panel)
         self.window.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.hide()
+        self.preview.activity.connect(self.log.appendPlainText)
+        self.preview.activity.connect(self.window.statusBar().showMessage)
+        self.preview.activity.connect(self.log_dock.show)
         view_menu.addAction(self.log_dock.toggleViewAction())
 
     def copy_log(self):
@@ -739,24 +747,27 @@ class Application(QObject):
         self.probe_next()
 
     def probe_next(self):
-        if not self.pending and not self.probing_paths:
-            self.loading = False
-            self.scanning_paused = False
-            self.scan_stop_requested = False
-            self.rebalance()
-            return
         if self.scan_stop_requested:
             if not self.probing_paths:
                 self.loading = False
                 self.scanning_paused = False
                 self.scan_stop_requested = False
                 self.window.statusBar().showMessage("Scanning stopped. Create Timelines to continue.")
+                self.log.appendPlainText("Scanning stopped. Create Timelines to continue.")
                 self.refresh()
+            return
+        if not self.pending and not self.probing_paths:
+            self.loading = False
+            self.scanning_paused = False
+            self.scan_stop_requested = False
+            self.log.appendPlainText("Scanning completed")
+            self.rebalance()
             return
         if self.scanning_paused:
             if not self.probing_paths:
                 self.scan_pause_started = monotonic()
                 self.window.statusBar().showMessage("Scanning paused")
+                self.log.appendPlainText("Scanning paused")
             return
         for probe in self.probes[:self.scan_worker_count]:
             if self.pending and probe not in self.probing_paths:
@@ -783,15 +794,20 @@ class Application(QObject):
         self.scanning_paused = not self.scanning_paused
         if not self.scanning_paused and not self.probing_paths:
             self.scan_started += monotonic() - self.scan_pause_started
-        self.window.statusBar().showMessage(
+        message = (
             "Pausing scanning after active scans finish" if self.scanning_paused
             else "Resuming scanning"
         )
+        self.log_dock.show()
+        self.log.appendPlainText(message)
+        self.window.statusBar().showMessage(message)
         self.update_enabled()
         self.probe_next()
 
     def stop_scanning(self):
         self.scan_stop_requested = True
+        self.log_dock.show()
+        self.log.appendPlainText("Stopping scanning after active scans finish")
         self.window.statusBar().showMessage("Stopping scanning after active scans finish")
         self.update_enabled()
         self.probe_next()
@@ -1253,7 +1269,23 @@ class Application(QObject):
                 if render_timelines:
                     args = partial(composition_arguments, group_columns, duration, output, graph_path, config)
                 else:
-                    args = partial(division_arguments, group_tracks, duration, output, graph_path, config, self.audio_peaks)
+                    segments = division_segments(group_tracks, config)
+                    if len(segments) == 1:
+                        args = partial(division_arguments, group_tracks, duration, output, graph_path, config, self.audio_peaks)
+                    else:
+                        segment_paths = []
+                        for segment_index, (first, last) in enumerate(segments):
+                            segment_path = graph_root / f"division{division_start}-segment{segment_index}.nut"
+                            segment_paths.append(segment_path)
+                            self.export_jobs.append((
+                                segment_path, float((last - first) / Fraction(config.fps)),
+                                partial(division_segment_arguments, group_tracks, first, last,
+                                        segment_path, segment_path.with_suffix(".ffgraph"), config,
+                                        self.audio_peaks),
+                            ))
+                        args = partial(join_division_arguments, segment_paths, group_tracks, duration, output,
+                                       graph_root / f"division{division_start}.ffconcat", config, self.audio_peaks)
+                        self.column_cleanup[len(self.export_jobs)] = segment_paths
                 self.export_jobs.append((output, duration, args))
                 if render_timelines and self.assembler.remove_timelines.isChecked():
                     self.column_cleanup[len(self.export_jobs) - 1] = group_columns
@@ -1285,9 +1317,6 @@ class Application(QObject):
         path, self.stage_duration, args = self.export_jobs[self.export_index]
         measuring = self.export_index in self.measurement_keys
         self.measuring_audio = measuring
-        self.audio_items_processed = 0
-        self.audio_analysis_started = monotonic()
-        self.audio_last_progress = None
         self.measurement_seconds = {}
         if callable(args) and not measuring:
             if (
@@ -1324,6 +1353,7 @@ class Application(QObject):
             if callable(args):
                 args = args()
             process = QProcess(self)
+            process.started.connect(partial(self.log.appendPlainText, f"FFmpeg started: {path.name}"))
             self.measurement_processes[process] = [index, "", "", None]
             self.measurement_seconds[index] = 0.0
             process.readyReadStandardOutput.connect(partial(self.read_measurement, process))
@@ -1347,13 +1377,13 @@ class Application(QObject):
             if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
                 seconds = max(self.measurement_seconds[index], min(self.export_jobs[index][1] * 0.999, int(line[12:]) / 1_000_000))
                 if seconds > self.measurement_seconds[index]:
-                    self.audio_last_progress = monotonic()
-                    if state[3] is None or self.audio_last_progress - state[3] >= 5:
+                    now = monotonic()
+                    if state[3] is None or now - state[3] >= 5:
                         path, duration, _ = self.export_jobs[index]
                         self.log.appendPlainText(
                             f"Measured audio {path.name}: {seconds:.1f} / {duration:.1f} s"
                         )
-                        state[3] = self.audio_last_progress
+                        state[3] = now
                 self.measurement_seconds[index] = seconds
         self.stage_seconds = sum(self.measurement_seconds.values())
         self.update_export_progress()
@@ -1374,7 +1404,6 @@ class Application(QObject):
             self.normalization_cache[self.measurement_cache_keys[index]] = measured["input_tp"]
             self.save_active_state()
             self.measurement_seconds[index] = self.export_jobs[index][1]
-            self.audio_items_processed += 1
             self.stage_seconds = sum(self.measurement_seconds.values())
             self.log.appendPlainText(
                 f"Audio measured {self.export_jobs[index][0].name}: "
@@ -1393,23 +1422,28 @@ class Application(QObject):
 
     def pause_export(self):
         self.render_paused = not self.render_paused
+        message = "Pausing after active work finishes" if self.render_paused else "Resuming work"
+        self.log_dock.show()
+        self.log.appendPlainText(message)
+        self.window.statusBar().showMessage(message)
         self.update_enabled()
-        if self.render_paused:
-            self.window.statusBar().showMessage("Pausing after active work finishes")
-        elif self.render_waiting:
+        if not self.render_paused and self.render_waiting:
             self.group_started += monotonic() - self.render_pause_started
             self.render_waiting = False
             self.start_export_job()
 
     def stop_export(self):
         self.stop_requested = True
+        self.log_dock.show()
+        self.log.appendPlainText("Stop requested. Waiting for active work to exit")
+        self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")
         if self.render_waiting:
             self.end_export("Rendering stopped")
         elif self.measurement_processes:
-            for process in self.measurement_processes:
-                process.write(b"q\n")
+            for process in list(self.measurement_processes):
+                process.kill()
         else:
-            self.process.write(b"q\n")
+            self.process.kill()
 
     def read_progress(self):
         self.progress_buffer += bytes(self.process.readAllStandardOutput()).decode()
@@ -1429,6 +1463,7 @@ class Application(QObject):
         total = sum(job[1] for job in self.export_jobs[self.group_start:self.group_end])
         completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
         fraction = completed / total
+        self.progress.setRange(0, 0 if self.measuring_audio and not self.stage_seconds else 1000)
         self.progress.setValue(min(999, int(fraction * 1000)) if fraction < 1 else 1000)
         self.update_runtime()
 
@@ -1439,25 +1474,21 @@ class Application(QObject):
         completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
         eta = timestamp(elapsed_seconds * (total - completed) / completed) if completed else "--:--:--"
         if self.measuring_audio:
-            rate = self.stage_seconds / (monotonic() - self.audio_analysis_started) if self.stage_seconds else 0.0
-            throughput = f"{rate:.1f} audio s/s avg"
+            self.progress.setFormat(
+                f"{self.group_name} - Measuring audio" + (" - %p%" if self.stage_seconds else "")
+            )
         else:
-            throughput = f"{self.render_frames_per_second:.1f} frames/s"
-        self.progress.setFormat(
-            f"{self.group_name} - %p% - ETA {eta} - {throughput}"
-        )
-        if self.measuring_audio:
-            duration = sum(self.export_jobs[index][1] for index in self.measurement_seconds)
-            activity = (
-                "Waiting for audio progress" if self.audio_last_progress is None
-                else f"Last audio advance {monotonic() - self.audio_last_progress:.0f} s ago"
+            self.progress.setFormat(
+                f"{self.group_name} - %p% - ETA {eta} - {self.render_frames_per_second:.1f} frames/s"
             )
+        if self.stop_requested:
+            self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")
+        elif self.render_paused:
             self.window.statusBar().showMessage(
-                f"Audio {self.stage_seconds:.1f} / {duration:.1f} s. "
-                f"Batch {self.audio_items_processed}/{len(self.measurement_seconds)} complete, "
-                f"{len(self.measurement_processes)} active. {activity}. Runtime {elapsed}. "
-                f"{self.stage_description}"
+                "Rendering paused" if self.render_waiting else "Pausing after active work finishes"
             )
+        elif self.measuring_audio:
+            self.window.statusBar().showMessage(self.stage_description)
         else:
             self.window.statusBar().showMessage(
                 f"{self.stage_description}. Runtime {elapsed}"
@@ -1492,6 +1523,7 @@ class Application(QObject):
                 self.render_waiting = True
                 self.render_pause_started = monotonic()
                 self.window.statusBar().showMessage("Rendering paused")
+                self.log.appendPlainText("Rendering paused")
                 self.update_enabled()
             else:
                 self.start_export_job()
@@ -1510,6 +1542,7 @@ class Application(QObject):
         self.window.statusBar().showMessage(
             f"{result} - {self.export_jobs[self.export_index][0]}"
         )
+        self.log.appendPlainText(f"{result} - {self.export_jobs[self.export_index][0]}")
         self.update_enabled()
 
     def check_updates(self):

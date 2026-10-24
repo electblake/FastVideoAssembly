@@ -155,8 +155,11 @@ remeasures all scanned audio sources in True Peak mode and clears saved mix resu
 YouTube mode retains dynamic loudness processing during each render.
 **Audio analysis workers** sets the maximum concurrent True Peak measurements
 before each column render (default 2). Measurements run in bounded batches;
-pause takes effect after the active batch, and stop signals all active workers.
-The final mix is measured after its columns finish.
+pause takes effect after the active batch, and stop terminates active workers.
+The final mix is measured after its columns finish when interim timelines are
+enabled, or directly from its source audio otherwise. Audio measurement displays
+only its stage and real progress; Activity records confirmed FFmpeg startup,
+processed audio timestamps, and completed measurements.
 **CPU filter threads** in Render Settings controls column and final render filter
 graphs (default 4). Both settings are saved. Input decoders remain limited to one
 thread each because a column opens multiple sources. GPU processing is unchanged.
@@ -187,11 +190,17 @@ or `_FINAL_ABCD` and `_FINAL_EFGH` with four. A single division retains `_FINAL`
 Each division and its optional final finish before the next division starts;
 all target filenames are checked before rendering begins.
 **Render interim timelines** is on by default. Uncheck it to encode each division
-straight from its source clips into its own final file, without saving timeline
-media. Keep **Create final assembly** checked for this mode; Render is disabled
+from its source clips into its own final file, without saving timeline media.
+Large divisions use temporary compressed video segments at the selected encoding
+quality, then join them without re-encoding video. This bounds process arguments
+and concurrent video decoders while preserving the selected GPU backend. Audio
+is mixed continuously during the final join. Temporary video storage is roughly
+the size of the encoded division, rather than lossless video, and is removed at
+completion or cancellation.
+Keep **Create final assembly** checked for this mode; Render is disabled
 when neither output option is selected. Normalization, clip timing, and final-frame
 holds are preserved. True Peak still measures sources, then measures the normalized
-source audio mix before the single video render. Divisions remain separate files.
+source audio mix before video rendering. Divisions remain separate files.
 **Delete timelines after final render** is disabled when interim rendering is off.
 
 **Delete timelines after final render** is off by default. When enabled, each completed

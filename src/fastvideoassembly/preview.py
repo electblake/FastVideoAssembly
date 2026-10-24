@@ -1,6 +1,6 @@
 """Dock content for previewing the selected source video."""
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -14,6 +14,8 @@ from PySide6.QtWidgets import (
 
 
 class Preview(QWidget):
+    activity = Signal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -37,6 +39,7 @@ class Preview(QWidget):
         self.play_button.clicked.connect(self.toggle_playback)
         self.stop_button = QPushButton("Stop")
         self.stop_button.clicked.connect(self.player.stop)
+        self.stop_button.clicked.connect(lambda: self.activity.emit("Preview stopped"))
         controls.addWidget(self.play_button)
         controls.addWidget(self.stop_button)
         self.time = QLabel("00:00:00 / 00:00:00")
@@ -68,8 +71,10 @@ class Preview(QWidget):
     def toggle_playback(self):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
+            self.activity.emit("Preview paused")
         else:
             self.player.play()
+            self.activity.emit("Preview playback requested")
 
     def update_position(self, *_):
         position, duration = self.player.position(), self.player.duration()
