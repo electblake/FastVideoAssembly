@@ -50,12 +50,9 @@ Source: "{localappdata}\{#MyAppName}\Cache\downloads\uv-{#UvHash}.zip"; DestDir:
 Source: "{#FFmpegUrl}"; DestDir: "{localappdata}\{#MyAppName}\Cache\downloads"; DestName: "ffmpeg-{#FFmpegHash}.zip"; ExternalSize: {#FFmpegDownloadSize}; Hash: "{#FFmpegHash}"; Flags: external download ignoreversion onlyifdoesntexist uninsneveruninstall
 Source: "{localappdata}\{#MyAppName}\Cache\downloads\ffmpeg-{#FFmpegHash}.zip"; DestDir: "{app}\tools\ffmpeg"; ExternalSize: {#FFmpegSize}; Hash: "{#FFmpegHash}"; Flags: external extractarchive ignoreversion recursesubdirs createallsubdirs
 
-[Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\application\.venv\Scripts\pythonw.exe"; Parameters: "-I -m fastvideoassembly.installed"; WorkingDir: "{app}"; IconFilename: "{app}\application\src\fastvideoassembly\FastVideoAssembly-blue.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\application\.venv\Scripts\pythonw.exe"; Parameters: "-I -m fastvideoassembly.installed"; WorkingDir: "{app}"; IconFilename: "{app}\application\src\fastvideoassembly\FastVideoAssembly-blue.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\application\.venv\Scripts\pythonw.exe"; Parameters: "-I -m fastvideoassembly.installed"; WorkingDir: "{app}"; IconFilename: "{app}\application\src\fastvideoassembly\FastVideoAssembly-blue.ico"
 
 [Run]
 Filename: "{app}\tools\uv\uv.exe"; Parameters: "sync --project ""{app}\application"" --python ""{app}\runtime\python\python.exe"" --no-python-downloads --locked --no-dev --no-editable --no-config --no-cache"; StatusMsg: "Installing locked Python dependencies..."; Flags: runhidden logoutput

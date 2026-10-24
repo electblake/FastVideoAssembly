@@ -11,9 +11,10 @@ uv run python packaging/build.py --iscc "C:\Users\shoji\AppData\Local\Programs\I
 ```
 
 Requires Inno Setup 6.7.3. Output is
-`dist/installer/FastVideoAssembly-0.3.0-windows-amd64-Setup.exe` plus SHA-256.
+`dist/installer/FastVideoAssembly-0.3.1-windows-amd64-Setup.exe` plus SHA-256.
 Setup downloads hash-verified private Python 3.13.12, uv and FFmpeg 8.1.2;
 Internet is required for installation. Application use is offline afterward.
 No PATH or system Python changes. Source licenses and third-party notices are
-included. This build is unsigned. Clean-machine installation, upgrade and
+included. Setup creates Start Menu and desktop shortcuts for the current user.
+This build is unsigned. Clean-machine installation, upgrade and
 uninstallation must be verified before release.
