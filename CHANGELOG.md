@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `-NoProfile` to both launchers and `Application(no_profile=True)` for isolated sessions that start with defaults and never read or modify the saved user profile.
+
 ## [0.4.0] - 2026-10-24
 
 ### Added

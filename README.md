@@ -13,6 +13,12 @@ uv sync --locked
 uv run fastvideoassembly
 ```
 
+Use `uv run fastvideoassembly -NoProfile` to start with default settings without
+reading or modifying your saved profile. This also works with the installed
+launcher and can be combined with video or folder paths. Settings use a fresh
+temporary INI file for each session. Programmatic callers can use
+`Application(no_profile=True)`.
+
 Use Add Videos or Ctrl+O to select videos and folders together, drop files/folders onto the source list or window, or pass paths to
 `uv run fastvideoassembly "C:\Videos"`. Imports include immediate MP4, MKV, MOV,
 AVI and WebM files, without recursion or duplicates. Importing adds to the

@@ -12,7 +12,9 @@ MODULE = "fastvideoassembly.installed"
 
 
 def main():
-    if sys.argv[1:] == ["--install-explorer"]:
+    no_profile = "-NoProfile" in sys.argv[1:]
+    paths = [arg for arg in sys.argv[1:] if arg != "-NoProfile"]
+    if paths == ["--install-explorer"]:
         return integrations.install(MODULE)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -23,8 +25,9 @@ def main():
     controller = Application(
         str(tools / "ffmpeg.exe"),
         str(tools / "ffprobe.exe"),
-        paths=sys.argv[1:],
+        paths=paths,
         launcher_module=MODULE,
+        no_profile=no_profile,
     )
     controller.window.show()
     return app.exec()

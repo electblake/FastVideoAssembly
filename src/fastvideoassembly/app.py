@@ -97,15 +97,23 @@ class Application(QObject):
         ffprobe="ffprobe",
         paths=(),
         launcher_module=integrations.APP_MODULE,
+        no_profile=False,
     ):
         super().__init__()
         self.native_style = QApplication.style().objectName()
         self.ffmpeg, self.ffprobe = ffmpeg, ffprobe
         self.launcher_module = launcher_module
+        if no_profile:
+            self.settings_directory = tempfile.TemporaryDirectory(prefix="FastVideoAssembly-")
+            settings_path = Path(self.settings_directory.name) / "settings.ini"
+        else:
+            settings_path = user_config_path(APP_NAME, appauthor=False) / "settings.ini"
         self.settings = QSettings(
-            str(user_config_path(APP_NAME, appauthor=False) / "settings.ini"),
+            str(settings_path),
             QSettings.Format.IniFormat,
         )
+        if no_profile:
+            self.settings.setFallbacksEnabled(False)
         self.clips = []
         self.pending = []
         self.loading = False
@@ -1416,12 +1424,14 @@ class Application(QObject):
 
 
 def main():
-    if sys.argv[1:] == ["--install-explorer"]:
+    no_profile = "-NoProfile" in sys.argv[1:]
+    paths = [arg for arg in sys.argv[1:] if arg != "-NoProfile"]
+    if paths == ["--install-explorer"]:
         return integrations.install()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_NAME)
-    controller = Application(paths=sys.argv[1:])
+    controller = Application(paths=paths, no_profile=no_profile)
     controller.window.show()
     return app.exec()
