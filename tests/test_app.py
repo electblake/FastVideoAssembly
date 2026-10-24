@@ -2547,6 +2547,7 @@ def test_normalization_cache_survives_restart(controller, preview_source, tmp_pa
     restored.start_export(tmp_path / "second.mp4")
     qtbot.waitUntil(lambda: not restored.running, timeout=30000)
     assert restored.measurement_keys == {}
+    assert f"Reusing saved audio measurement {preview_source}:" in restored.log.toPlainText()
     assert restored.audio_peaks[preview_source] == peaks[preview_source]
     assert (tmp_path / "second_FINAL.mp4").exists()
     restored.assembler.tracks[0].append(clip)
@@ -2556,7 +2557,9 @@ def test_normalization_cache_survives_restart(controller, preview_source, tmp_pa
 
 
 @pytest.mark.profile
-def test_manual_normalization_and_source_change(controller, preview_source, tmp_path, qtbot):
+def test_manual_normalization_and_source_change(controller, preview_source, tmp_path, qtbot, monkeypatch):
+    import json
+
     clip = Clip(preview_source, 0.5, 60, 120, True)
     controller.clips = [clip]
     controller.normalization.setCurrentText("True Peak")
@@ -2566,14 +2569,27 @@ def test_manual_normalization_and_source_change(controller, preview_source, tmp_
     qtbot.waitUntil(lambda: not controller.running, timeout=30000)
     assert len(controller.normalization_cache) == 1
     original_key = controller.source_audio_key(clip)
+    mix_key = json.dumps(["mix-v1", "previous mix"])
+    controller.normalization_cache[mix_key] = "-8.0"
+    controller.save_active_state()
+    launch = Mock(wraps=controller.start_export_job)
+    monkeypatch.setattr(controller, "start_export_job", launch)
     controller.normalize_button.click()
     qtbot.waitUntil(lambda: not controller.running, timeout=30000)
-    assert list(controller.measurement_keys.values()) == [preview_source]
+    launch.assert_not_called()
+    assert controller.measurement_keys == {}
+    assert controller.export_directory is None
+    assert controller.normalization_cache[mix_key] == "-8.0"
+    assert f"Reusing saved audio measurement {preview_source}:" in controller.log.toPlainText()
     restored = app.Application()
     qtbot.addWidget(restored.window)
     assert restored.normalization_cache == controller.normalization_cache
     preview_source.touch()
     assert restored.source_audio_key(clip) != original_key
+    controller.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert list(controller.measurement_keys.values()) == [preview_source]
+    assert controller.normalization_cache[mix_key] == "-8.0"
     controller.audio_codec.setCurrentIndex(controller.audio_codec.findData("none"))
     assert not controller.normalize_button.isEnabled()
 
@@ -2592,6 +2608,9 @@ def test_manual_normalization_preserves_cache_until_success(controller, preview_
     mix_key = json.dumps(["mix-v1", "previous mix"])
     controller.normalization_cache = {source_key: "-6.0", mix_key: "-8.0"}
     controller.save_active_state()
+    preview_source.touch()
+    new_source_key = json.dumps(["source-v1", controller.source_audio_key(clip)])
+    assert new_source_key != source_key
     worker = Mock()
     worker.readAllStandardOutput.return_value = b""
     worker.readAllStandardError.return_value = b'{"input_tp": "-inf"}'
@@ -2603,12 +2622,43 @@ def test_manual_normalization_preserves_cache_until_success(controller, preview_
     clock[0] = 102.0
     controller.measurement_finished(worker, 1 if outcome == "failure" else 0, None)
     assert not controller.running
-    expected = {source_key: "-inf"} if outcome == "success" else {source_key: "-6.0", mix_key: "-8.0"}
+    expected = {source_key: "-6.0", mix_key: "-8.0"}
+    if outcome == "success":
+        expected[new_source_key] = "-inf"
     assert controller.normalization_cache == expected
     assert json.loads(controller.settings.value("audio/measurements")) == expected
 
 
-@pytest.mark.parametrize("change", ["unchanged", "file", "codec", "fps", "duration"])
+@pytest.mark.profile
+def test_manual_normalization_measures_only_new_clips(controller, preview_source, tmp_path, qtbot):
+    import json
+
+    cached = Clip(preview_source, 0.5, 60, 120, True)
+    new_path = tmp_path / "new.mp4"
+    new_path.write_bytes(preview_source.read_bytes())
+    new = Clip(new_path, 0.5, 60, 120, True)
+    controller.clips = [cached, new]
+    controller.normalization.setCurrentText("True Peak")
+    source_key = json.dumps(["source-v1", controller.source_audio_key(cached)])
+    mix_key = json.dumps(["mix-v1", "unrelated mix"])
+    controller.normalization_cache = {source_key: "-6.0", mix_key: "-8.0"}
+    controller.normalize_audio()
+    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert list(controller.measurement_keys.values()) == [new_path]
+    assert controller.audio_peaks[preview_source] == -6.0
+    assert controller.normalization_cache[source_key] == "-6.0"
+    assert controller.normalization_cache[mix_key] == "-8.0"
+    assert len(controller.normalization_cache) == 3
+    assert f"Reusing saved audio measurement {preview_source}:" in controller.log.toPlainText()
+    restored = app.Application()
+    qtbot.addWidget(restored.window)
+    restored.normalize_audio()
+    assert not restored.running
+    assert restored.measurement_keys == {}
+    assert restored.audio_peaks == controller.audio_peaks
+
+
+@pytest.mark.parametrize("change", ["unchanged", "file", "codec", "fps", "duration", "interims", "video"])
 def test_normalization_cache_invalidation(controller, preview_source, tmp_path, qtbot, monkeypatch, change):
     import os
     from dataclasses import replace
@@ -2629,15 +2679,21 @@ def test_normalization_cache_invalidation(controller, preview_source, tmp_path, 
         config = replace(config, audio_codec="ac3")
     elif change == "fps":
         config = replace(config, fps="60")
+    elif change == "interims":
+        controller.assembler.render_timelines.setChecked(True)
+    elif change == "video":
+        config = replace(config, height=240, quality=25, speed="slow")
     elif change == "duration":
         clip = replace(clip, duration=0.7)
         controller.assembler.tracks = [[clip], [clip], [clip]]
     monkeypatch.setattr(controller, "start_export_job", Mock())
     controller.start_export(tmp_path / "second.mp4")
-    expected = [] if change == "unchanged" else [tmp_path / "second_FINAL.mp4"]
+    expected = [] if change in ("unchanged", "video") else [tmp_path / "second_FINAL.mp4"]
     if change in ("file", "duration"):
         expected.insert(0, preview_source)
     assert list(controller.measurement_keys.values()) == expected
+    if change not in ("file", "duration"):
+        assert f"Reusing saved audio measurement {preview_source}:" in controller.log.toPlainText()
     controller.running = False
     controller.export_directory.cleanup()
     controller.export_directory = None

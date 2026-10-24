@@ -479,7 +479,7 @@ class Application(QObject):
         )
         codec_form.addRow("Normalization", self.normalization)
         self.normalize_button = QPushButton("Normalize Audio")
-        self.normalize_button.setToolTip("Remeasure True Peak adjustments for scanned sources.")
+        self.normalize_button.setToolTip("Measure missing True Peak adjustments and reuse saved measurements.")
         self.normalize_button.clicked.connect(self.normalize_audio)
         codec_form.addRow(self.normalize_button)
         self.analysis_workers = QSpinBox()
@@ -1145,9 +1145,13 @@ class Application(QObject):
         self.normalizing_audio = True
         for clip in self.clips:
             if isinstance(clip, Clip) and clip.has_audio:
+                cache_key = json.dumps(["source-v1", self.source_audio_key(clip)])
+                if cache_key in self.normalization_cache:
+                    self.audio_peaks[clip.path] = float(self.normalization_cache[cache_key])
+                    continue
                 index = len(self.export_jobs)
                 self.measurement_keys[index] = clip.path
-                self.measurement_cache_keys[index] = json.dumps(["source-v1", self.source_audio_key(clip)])
+                self.measurement_cache_keys[index] = cache_key
                 self.export_jobs.append((clip.path, clip.duration, peak_measurement_arguments(clip)))
         self.export_groups = [("Normalize Audio", 0, len(self.export_jobs))]
         self.export_index = 0
@@ -1157,7 +1161,18 @@ class Application(QObject):
         self.progress.setValue(0)
         if not self.assembler.keep_logs.isChecked():
             self.log.clear()
+        for path, peak in self.audio_peaks.items():
+            self.log.appendPlainText(f"Reusing saved audio measurement {path}: true peak {peak} dBTP")
         self.log_dock.show()
+        if not self.export_jobs:
+            self.export_directory.cleanup()
+            self.export_directory = None
+            self.normalizing_audio = False
+            self.progress.setRange(0, 1000)
+            self.progress.setValue(1000)
+            self.progress.setFormat("Normalize Audio - %p%")
+            self.window.statusBar().showMessage("Normalize Audio complete: saved measurements reused")
+            return
         self.running = True
         self.update_enabled()
         self.start_export_job()
@@ -1297,6 +1312,8 @@ class Application(QObject):
         self.progress.setValue(0)
         if not self.assembler.keep_logs.isChecked():
             self.log.clear()
+        for path, peak in self.audio_peaks.items():
+            self.log.appendPlainText(f"Reusing saved audio measurement {path}: true peak {peak} dBTP")
         self.log_dock.show()
         self.running = True
         self.update_enabled()
@@ -1396,11 +1413,6 @@ class Application(QObject):
         if exit_code == 0 and not self.stop_requested:
             measured = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
             self.audio_peaks[self.measurement_keys[index]] = float(measured["input_tp"])
-            if self.normalizing_audio:
-                self.normalization_cache = {
-                    key: value for key, value in self.normalization_cache.items()
-                    if json.loads(key)[0] != "mix-v1"
-                }
             self.normalization_cache[self.measurement_cache_keys[index]] = measured["input_tp"]
             self.save_active_state()
             self.measurement_seconds[index] = self.export_jobs[index][1]

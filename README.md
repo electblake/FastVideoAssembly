@@ -151,7 +151,9 @@ True Peak measurements use the same resampling, stereo conversion and duration
 as rendering. Measurements are saved with the project and reused across exports
 and restarts. Changed source files are measured again; changing the timeline or
 audio rendering settings invalidates the final mix measurement. **Normalize Audio**
-remeasures all scanned audio sources in True Peak mode and clears saved mix results.
+measures only scanned audio sources without a matching saved True Peak measurement.
+Reused measurements appear in Activity. Mix measurements are reused only while
+their source files, timeline contents, and relevant audio settings still match.
 YouTube mode retains dynamic loudness processing during each render.
 **Audio analysis workers** sets the maximum concurrent True Peak measurements
 before each column render (default 2). Measurements run in bounded batches;

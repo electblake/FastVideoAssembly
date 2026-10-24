@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-24
+
+### Fixed
+
+- Made Normalize Audio reuse saved True Peak measurements and measure only new or changed clips.
+- Completed fully cached normalization runs without starting FFmpeg and preserved unrelated final-mix measurements when measuring new sources.
+- Confirmed individual clip measurements remain reusable after changing interim rendering, audio codec, frame rate, and video settings.
+
+### Added
+
+- Logged saved audio measurement reuse during normalization and rendering.
+- Added regression coverage for cached-only and mixed cached/new normalization, restart reuse, changed sources, cancellation, and failures.
+
 ## [0.7.3] - 2026-10-24
 
 ### Added
