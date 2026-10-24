@@ -69,7 +69,7 @@ cancels the move. Clip numbers and their backgrounds are clipped to their segmen
 
 Click unused space in a timeline to toggle timeline selection independently of clip
 selection. The Timelines title shows the selected count, or All when none are selected.
-Organize Shortest Clips First, Organize Longest Clips First, and Shuffle affect only
+Shortest First, Longest First, and Shuffle affect only
 those timelines, preserving each timeline's clips and duration. Select None in this
 group clears only timeline selection. Create Timelines is the explicit action for
 redistributing sources and rebuilding the balanced arrangement.

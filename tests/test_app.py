@@ -946,8 +946,8 @@ def test_busy_locks_edits(controller):
 
 
 def test_order_buttons_keep_equal_track_totals(controller):
-    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
-    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
     assert not controller.assembler.longest_button.isEnabled()
     controller.clips = [Clip(Path(f"{n}.mp4"), n, 90, 160) for n in range(1, 19)]
     controller.rebalance()
@@ -1964,11 +1964,11 @@ def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns
         qtbot.mouseClick(timeline.viewport(), Qt.MouseButton.LeftButton, pos=position)
 
     click(0, 1)
-    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
-    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
     click(columns + 1, 1)
-    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
-    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
     assert controller.assembler.selected_timelines == {0, columns + 1}
     assert controller.assembler.track_backgrounds[0].property("selected")
     assert controller.assembler.track_backgrounds[0].opts["brush"].alpha() == 28
@@ -1988,8 +1988,8 @@ def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns
     click(0, 1)
     assert controller.assembler.selected_timelines == {columns + 1}
     assert not controller.assembler.track_backgrounds[0].property("selected")
-    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
-    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
     controller.select_clip(None)
     for _, bar in controller.assembler.segment_bars:
         assert not bar.property("active")
@@ -2002,8 +2002,8 @@ def test_timeline_selection_and_scoped_sort(controller, tmp_path, qtbot, columns
     assert controller.assembler.track_backgrounds[columns + 1].property("selected")
     controller.assembler.columns.setCurrentIndex(1 if columns == 3 else 0)
     assert not controller.assembler.selected_timelines
-    assert controller.assembler.balance_button.text() == "Organize Shortest Clips First"
-    assert controller.assembler.longest_button.text() == "Organize Longest Clips First"
+    assert controller.assembler.balance_button.text() == "Shortest First"
+    assert controller.assembler.longest_button.text() == "Longest First"
 
 
 @pytest.mark.parametrize("action, expected", [

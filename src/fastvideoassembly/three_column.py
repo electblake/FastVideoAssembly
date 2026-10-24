@@ -88,10 +88,10 @@ class ThreeColumnAssembly(QWidget):
         layout.addWidget(self.timeline, 1)
         self.timelines_group = QGroupBox("Timelines (All)")
         ordering_buttons = QGridLayout(self.timelines_group)
-        self.balance_button = QPushButton("Organize Shortest Clips First")
+        self.balance_button = QPushButton("Shortest First")
         self.balance_button.clicked.connect(controller.sort_timelines)
         ordering_buttons.addWidget(self.balance_button, 0, 0)
-        self.longest_button = QPushButton("Organize Longest Clips First")
+        self.longest_button = QPushButton("Longest First")
         self.longest_button.clicked.connect(
             lambda: controller.sort_timelines(longest_first=True)
         )
