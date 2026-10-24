@@ -1046,6 +1046,50 @@ def test_cpu_performance_settings_persist(controller, qtbot, monkeypatch):
     assert not restored.analysis_workers.isEnabled()
 
 
+@pytest.mark.parametrize("worker_count", [1, 2])
+def test_audio_progress_tracks_timestamps_and_stalled_activity(controller, tmp_path, monkeypatch, worker_count):
+    clock = [100.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
+    workers = [Mock() for _ in range(worker_count)]
+    for worker in workers:
+        worker.readAllStandardOutput.return_value = b""
+        worker.readAllStandardError.return_value = b""
+    monkeypatch.setattr(app, "QProcess", Mock(side_effect=workers))
+    controller.analysis_workers.setValue(worker_count)
+    controller.export_jobs = [(tmp_path / f"audio{i}.mp4", 100, []) for i in range(worker_count)]
+    controller.export_groups = [("FINAL", 0, worker_count)]
+    controller.measurement_keys = {i: job[0] for i, job in enumerate(controller.export_jobs)}
+    controller.export_index = 0
+    controller.start_export_job()
+    assert "Waiting for audio progress" in controller.window.statusBar().currentMessage()
+    clock[0] = 102.0
+    workers[0].readAllStandardOutput.return_value = b"out_time_us=2000"
+    controller.read_measurement(workers[0])
+    assert controller.progress.value() == 0
+    workers[0].readAllStandardOutput.return_value = b"0000\n"
+    controller.read_measurement(workers[0])
+    value = controller.progress.value()
+    assert value == 200 // worker_count
+    assert "10.0 audio s/s avg" in controller.progress.text()
+    status = controller.window.statusBar().currentMessage()
+    assert f"Audio 20.0 / {worker_count * 100:.1f} s" in status
+    assert f"Batch 0/{worker_count} complete, {worker_count} active" in status
+    assert "Measured audio audio0.mp4: 20.0 / 100.0 s" in controller.log.toPlainText()
+    log = controller.log.toPlainText()
+    clock[0] = 107.0
+    workers[0].readAllStandardOutput.return_value = b"out_time_us=20000000\n"
+    controller.read_measurement(workers[0])
+    controller.runtime_timer.timeout.emit()
+    assert controller.progress.value() == value
+    assert "Last audio advance 5 s ago" in controller.window.statusBar().currentMessage()
+    assert controller.log.toPlainText() == log
+    workers[0].readAllStandardOutput.return_value = b"out_time_us=30000000\n"
+    controller.read_measurement(workers[0])
+    assert "Measured audio audio0.mp4: 30.0 / 100.0 s" in controller.log.toPlainText()
+    assert "Last audio advance 0 s ago" in controller.window.statusBar().currentMessage()
+    controller.runtime_timer.stop()
+
+
 @pytest.mark.parametrize("outcome", ["resume", "stop", "failure", "failure_first"])
 def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
     clock = [100.0]
@@ -1067,7 +1111,7 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
     controller.start_export(tmp_path / "parallel.mp4")
     assert len(controller.measurement_processes) == 2
     assert factory.call_count == 2
-    assert controller.progress.text().endswith(" - 0.0 it/s")
+    assert controller.progress.text().endswith(" - 0.0 audio s/s avg")
     clock[0] = 102.0
     controller.pause_export()
     if outcome == "stop":
@@ -1080,14 +1124,14 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
     workers[1].readAllStandardOutput.return_value = b""
     workers[1].readAllStandardError.return_value = b'{"input_tp": "-6.0"}'
     controller.measurement_finished(workers[1], 1 if outcome == "failure" else 0, None)
-    assert controller.progress.text().endswith(" - 0.5 it/s" if outcome in ("resume", "failure_first") else " - 0.0 it/s")
+    assert controller.progress.text().endswith(" - 0.5 audio s/s avg" if outcome in ("resume", "failure_first") else " - 0.2 audio s/s avg")
     assert controller.running
     assert controller.export_index == 0
     workers[0].readAllStandardError.return_value = b'{"input_tp": "-3.0"}'
     controller.measurement_finished(workers[0], 1 if outcome == "failure_first" else 0, None)
     assert not controller.measurement_processes
     if outcome == "resume":
-        assert controller.progress.text().endswith(" - 1.0 it/s")
+        assert controller.progress.text().endswith(" - 1.0 audio s/s avg")
         assert controller.render_waiting
         assert not controller.runtime_timer.isActive()
         assert controller.export_index == 2
@@ -1095,7 +1139,7 @@ def test_parallel_measurement_batch(controller, tmp_path, monkeypatch, outcome):
         controller.pause_export()
         assert len(controller.measurement_processes) == 1
         assert factory.call_count == 3
-        assert controller.progress.text().endswith(" - 0.0 it/s")
+        assert controller.progress.text().endswith(" - 0.0 audio s/s avg")
         controller.stop_export()
         controller.measurement_finished(workers[2], 0, None)
     assert not controller.running
@@ -2399,6 +2443,8 @@ def test_manual_normalization_and_source_change(controller, preview_source, tmp_
 def test_manual_normalization_preserves_cache_until_success(controller, preview_source, qtbot, monkeypatch, outcome):
     import json
 
+    clock = [100.0]
+    monkeypatch.setattr(app, "monotonic", lambda: clock[0])
     clip = Clip(preview_source, 0.5, 60, 120, True)
     controller.clips = [clip]
     controller.normalization.setCurrentText("True Peak")
@@ -2414,6 +2460,7 @@ def test_manual_normalization_preserves_cache_until_success(controller, preview_
     assert controller.normalization_cache == {source_key: "-6.0", mix_key: "-8.0"}
     if outcome == "stop":
         controller.stop_export()
+    clock[0] = 102.0
     controller.measurement_finished(worker, 1 if outcome == "failure" else 0, None)
     assert not controller.running
     expected = {source_key: "-inf"} if outcome == "success" else {source_key: "-6.0", mix_key: "-8.0"}

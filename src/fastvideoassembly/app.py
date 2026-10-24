@@ -1286,6 +1286,8 @@ class Application(QObject):
         self.measuring_audio = measuring
         self.audio_items_processed = 0
         self.audio_analysis_started = monotonic()
+        self.audio_last_progress = None
+        self.measurement_seconds = {}
         if callable(args) and not measuring:
             if (
                 args.func in (composition_arguments, division_arguments)
@@ -1321,7 +1323,7 @@ class Application(QObject):
             if callable(args):
                 args = args()
             process = QProcess(self)
-            self.measurement_processes[process] = [index, "", ""]
+            self.measurement_processes[process] = [index, "", "", None]
             self.measurement_seconds[index] = 0.0
             process.readyReadStandardOutput.connect(partial(self.read_measurement, process))
             process.readyReadStandardError.connect(partial(self.read_measurement, process))
@@ -1329,6 +1331,7 @@ class Application(QObject):
             self.measurement_last = index
             self.log.appendPlainText(f"Measuring audio {path}\n")
             process.start(self.ffmpeg, args)
+        self.update_export_progress()
 
     def read_measurement(self, process):
         state = self.measurement_processes[process]
@@ -1336,17 +1339,27 @@ class Application(QObject):
         state[1] += bytes(process.readAllStandardOutput()).decode()
         text = bytes(process.readAllStandardError()).decode()
         state[2] += text
-        self.log.appendPlainText(text)
+        if text:
+            self.log.appendPlainText(text)
         while "\n" in state[1]:
             line, state[1] = state[1].split("\n", 1)
             if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
-                self.measurement_seconds[index] = max(self.measurement_seconds[index], min(self.export_jobs[index][1] * 0.999, int(line[12:]) / 1_000_000))
+                seconds = max(self.measurement_seconds[index], min(self.export_jobs[index][1] * 0.999, int(line[12:]) / 1_000_000))
+                if seconds > self.measurement_seconds[index]:
+                    self.audio_last_progress = monotonic()
+                    if state[3] is None or self.audio_last_progress - state[3] >= 5:
+                        path, duration, _ = self.export_jobs[index]
+                        self.log.appendPlainText(
+                            f"Measured audio {path.name}: {seconds:.1f} / {duration:.1f} s"
+                        )
+                        state[3] = self.audio_last_progress
+                self.measurement_seconds[index] = seconds
         self.stage_seconds = sum(self.measurement_seconds.values())
         self.update_export_progress()
 
     def measurement_finished(self, process, exit_code, exit_status):
         self.read_measurement(process)
-        index, _, log = self.measurement_processes.pop(process)
+        index, _, log, _ = self.measurement_processes.pop(process)
         process.deleteLater()
         self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
         if exit_code == 0 and not self.stop_requested:
@@ -1361,6 +1374,11 @@ class Application(QObject):
             self.save_active_state()
             self.measurement_seconds[index] = self.export_jobs[index][1]
             self.audio_items_processed += 1
+            self.stage_seconds = sum(self.measurement_seconds.values())
+            self.log.appendPlainText(
+                f"Audio measured {self.export_jobs[index][0].name}: "
+                f"{self.export_jobs[index][1]:.1f} s, true peak {measured['input_tp']} dBTP"
+            )
             self.update_runtime()
         if exit_code != 0:
             self.measurement_exit_code = exit_code
@@ -1420,16 +1438,29 @@ class Application(QObject):
         completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
         eta = timestamp(elapsed_seconds * (total - completed) / completed) if completed else "--:--:--"
         if self.measuring_audio:
-            rate = self.audio_items_processed / (monotonic() - self.audio_analysis_started) if self.audio_items_processed else 0.0
-            throughput = f"{rate:.1f} it/s"
+            rate = self.stage_seconds / (monotonic() - self.audio_analysis_started) if self.stage_seconds else 0.0
+            throughput = f"{rate:.1f} audio s/s avg"
         else:
             throughput = f"{self.render_frames_per_second:.1f} frames/s"
         self.progress.setFormat(
             f"{self.group_name} - %p% - ETA {eta} - {throughput}"
         )
-        self.window.statusBar().showMessage(
-            f"{self.stage_description}. Runtime {elapsed}"
-        )
+        if self.measuring_audio:
+            duration = sum(self.export_jobs[index][1] for index in self.measurement_seconds)
+            activity = (
+                "Waiting for audio progress" if self.audio_last_progress is None
+                else f"Last audio advance {monotonic() - self.audio_last_progress:.0f} s ago"
+            )
+            self.window.statusBar().showMessage(
+                f"Audio {self.stage_seconds:.1f} / {duration:.1f} s. "
+                f"Batch {self.audio_items_processed}/{len(self.measurement_seconds)} complete, "
+                f"{len(self.measurement_processes)} active. {activity}. Runtime {elapsed}. "
+                f"{self.stage_description}"
+            )
+        else:
+            self.window.statusBar().showMessage(
+                f"{self.stage_description}. Runtime {elapsed}"
+            )
 
     def read_log(self):
         text = bytes(self.process.readAllStandardError()).decode()

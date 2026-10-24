@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-24
+
+### Fixed
+
+- Replaced completed-items throughput during audio measurement with average audio seconds processed per second, driven by FFmpeg timestamps.
+- Showed processed audio duration, batch completion and active worker counts, and time since audio last advanced, including final-mix measurement without interim timelines.
+- Added periodic per-file audio progress and completed true-peak results to the Activity log, and stopped inserting blank lines for progress-only updates.
+- Updated completed audio duration immediately when a measurement finished.
+
 ## [0.7.0] - 2026-10-24
 
 ### Added
