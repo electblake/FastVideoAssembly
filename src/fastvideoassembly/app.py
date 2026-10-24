@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QFormLayout,
@@ -58,6 +59,18 @@ from .three_column import COLUMN_NAMES, ThreeColumnAssembly
 def timestamp(seconds):
     minutes, seconds = divmod(seconds, 60)
     return f"{int(minutes):02d}:{seconds:04.1f}"
+
+
+class VideoSourceDialog(QFileDialog):
+    def __init__(self, parent, directory):
+        super().__init__(parent, "Add Videos", directory)
+        self.setOption(QFileDialog.Option.DontUseNativeDialog)
+        self.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        self.setNameFilter("Videos (*.mp4 *.mkv *.mov *.avi *.webm)")
+        self.setLabelText(QFileDialog.DialogLabel.Accept, "Add")
+
+    def accept(self):
+        QDialog.accept(self)
 
 
 class Application(QObject):
@@ -111,7 +124,7 @@ class Application(QObject):
 
     def build_ui(self):
         file_menu = self.window.menuBar().addMenu("&File")
-        self.open_action = QAction("Open &folder…", self)
+        self.open_action = QAction("&Add Videos…", self)
         self.open_action.setShortcut(QKeySequence.StandardKey.Open)
         self.open_action.triggered.connect(self.open_folder)
         file_menu.addAction(self.open_action)
@@ -151,11 +164,14 @@ class Application(QObject):
 
         library_widget = QWidget()
         library_layout = QVBoxLayout(library_widget)
-        self.open_button = QPushButton("Open folder…")
+        self.open_button = QPushButton("Add Videos")
         self.open_button.clicked.connect(self.open_folder)
         library_layout.addWidget(self.open_button)
         self.library = QListWidget()
         self.library.setAccessibleName("Source videos")
+        self.library.setAcceptDrops(True)
+        self.library.viewport().setAcceptDrops(True)
+        self.library.viewport().installEventFilter(self)
         self.library.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.library.currentRowChanged.connect(self.select_source)
         self.library.itemSelectionChanged.connect(self.select_source)
@@ -415,21 +431,25 @@ class Application(QObject):
         self.refresh()
 
     def open_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self.window, "Select video folder", self.settings.value("folder_path", "")
+        dialog = VideoSourceDialog(
+            self.window, self.settings.value("folder_path", "")
         )
-        if folder:
-            self.settings.setValue("folder_path", folder)
-            self.add_paths([folder])
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.settings.setValue("folder_path", dialog.directory().absolutePath())
+            self.add_paths(dialog.selectedFiles())
+        dialog.deleteLater()
 
     def add_paths(self, paths):
+        known = {clip.path for clip in self.clips}
+        additions = [path for path in video_paths(paths) if path not in known]
         if paths and not self.clips:
             source = Path(paths[0]).resolve()
             self.project_name.setText(
                 source.name if source.is_dir() else source.parent.name
             )
-        known = {clip.path for clip in self.clips}
-        self.pending = [path for path in video_paths(paths) if path not in known]
+        if not additions:
+            return
+        self.pending = additions
         self.progress.setRange(0, 1000)
         self.progress.setValue(0)
         self.loading = True
@@ -878,12 +898,14 @@ class Application(QObject):
 
     def eventFilter(self, watched, event):
         if (
-            event.type() in (QEvent.Type.DragEnter, QEvent.Type.Drop)
+            event.type() in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop)
             and not self.loading
             and not self.running
             and event.mimeData().hasUrls()
+            and all(url.isLocalFile() for url in event.mimeData().urls())
         ):
-            event.acceptProposedAction()
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
             if event.type() == QEvent.Type.Drop:
                 self.add_paths([url.toLocalFile() for url in event.mimeData().urls()])
             return True

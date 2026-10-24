@@ -13,7 +13,7 @@ uv sync --locked
 uv run fastvideoassembly
 ```
 
-Open a folder with Ctrl+O, drop files/folders onto the window, or pass paths to
+Use Add Videos or Ctrl+O to select videos and folders together, drop files/folders onto the source list or window, or pass paths to
 `uv run fastvideoassembly "C:\Videos"`. Imports include immediate MP4, MKV, MOV,
 AVI and WebM files, without recursion or duplicates. Importing adds to the
 library and rebuilds the balanced arrangement. Clear assembly starts over.

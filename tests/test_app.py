@@ -679,3 +679,112 @@ def test_ctrl_deselect_updates_preview_and_disables_empty_selection(controller, 
     assert not controller.assembler.right_button.isEnabled()
     controller.refresh()
     assert not listing.selectedItems()
+
+
+def test_add_dialog_accepts_mixed_files_and_folders(controller, tmp_path, qtbot):
+    from PySide6.QtCore import QItemSelectionModel
+    from PySide6.QtWidgets import QDialogButtonBox, QListView
+
+    folder = tmp_path / 'folder'
+    folder.mkdir()
+    video = tmp_path / 'clip.mp4'
+    video.touch()
+    dialog = app.VideoSourceDialog(controller.window, str(tmp_path))
+    qtbot.addWidget(dialog)
+    dialog.show()
+    view = dialog.findChild(QListView, 'listView')
+    model = view.model()
+    qtbot.waitUntil(lambda: model.index(str(video)).isValid())
+    for path in [folder, video]:
+        index = model.index(str(path))
+        view.selectionModel().select(index, QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
+    assert {Path(path) for path in dialog.selectedFiles()} == {folder, video}
+    box = dialog.findChild(QDialogButtonBox)
+    button = box.button(QDialogButtonBox.StandardButton.Open)
+    assert button.isEnabled()
+    button.click()
+    assert dialog.result() == app.QDialog.DialogCode.Accepted
+    assert {Path(path) for path in dialog.selectedFiles()} == {folder, video}
+
+
+def test_source_list_drop_adds_files_and_folders_incrementally(controller, preview_source, tmp_path, qtbot):
+    from PySide6.QtCore import QMimeData, QPoint
+    from PySide6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent
+
+    folder = tmp_path / 'folder'
+    folder.mkdir()
+    extra = folder / 'extra.mp4'
+    extra.hardlink_to(preview_source)
+    for paths, count in [([preview_source], 1), ([folder, preview_source], 2)]:
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(path)) for path in paths])
+        for event in [
+            QDragEnterEvent(QPoint(10, 10), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+            QDragMoveEvent(QPoint(10, 10), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+            QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+        ]:
+            app.QApplication.sendEvent(controller.library.viewport(), event)
+            assert event.isAccepted()
+        qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+        assert len(controller.clips) == count
+    assert {clip.path for clip in controller.clips} == {preview_source, extra}
+    assert controller.open_button.text() == 'Add Videos'
+
+
+def test_duplicate_import_preserves_manual_order_and_progress(controller, tmp_path):
+    path = tmp_path / 'clip.mp4'
+    path.touch()
+    clip = Clip(path, 3, 60, 120)
+    controller.clips = [clip]
+    controller.assembler.tracks = [[], [clip], []]
+    controller.refresh()
+    controller.progress.setValue(700)
+    controller.add_paths([path, tmp_path])
+    assert controller.assembler.tracks == [[], [clip], []]
+    assert controller.progress.value() == 700
+    assert not controller.loading
+
+
+@pytest.mark.parametrize('local', [True, False])
+def test_drop_always_imports_as_copy_and_rejects_remote_urls(controller, tmp_path, monkeypatch, local):
+    from PySide6.QtCore import QEvent, QMimeData
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(tmp_path)) if local else QUrl('https://example.com/video.mp4')])
+    event = Mock()
+    event.type.return_value = QEvent.Type.Drop
+    event.mimeData.return_value = mime
+    add = Mock()
+    monkeypatch.setattr(controller, 'add_paths', add)
+    if local:
+        assert controller.eventFilter(controller.library.viewport(), event)
+        event.setDropAction.assert_called_once_with(Qt.DropAction.CopyAction)
+        add.assert_called_once_with([str(tmp_path).replace('\\', '/')])
+    else:
+        # Use a real event for QObject's event filter when it is not a local import.
+        from PySide6.QtGui import QDropEvent
+        drop = QDropEvent(QPointF(10, 10), Qt.DropAction.CopyAction, mime,
+                          Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        assert not controller.eventFilter(controller.library.viewport(), drop)
+        add.assert_not_called()
+
+
+@pytest.mark.parametrize('origin', ['button', 'menu'])
+def test_add_videos_entry_points_and_cancel(controller, tmp_path, monkeypatch, origin):
+    dialog = Mock()
+    dialog.exec.return_value = app.QDialog.DialogCode.Accepted
+    dialog.directory.return_value.absolutePath.return_value = str(tmp_path)
+    paths = [str(tmp_path / 'clip.mp4'), str(tmp_path / 'folder')]
+    dialog.selectedFiles.return_value = paths
+    monkeypatch.setattr(app, 'VideoSourceDialog', Mock(return_value=dialog))
+    add = Mock()
+    monkeypatch.setattr(controller, 'add_paths', add)
+    trigger = controller.open_button.click if origin == 'button' else controller.open_action.trigger
+    trigger()
+    add.assert_called_once_with(paths)
+    assert controller.open_action.text() == '&Add Videos…'
+    dialog.deleteLater.assert_called_once()
+    add.reset_mock()
+    dialog.exec.return_value = app.QDialog.DialogCode.Rejected
+    trigger()
+    add.assert_not_called()

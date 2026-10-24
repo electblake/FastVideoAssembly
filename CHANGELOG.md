@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added mixed video/folder selection through Add Videos and direct drops onto the source list for incremental imports.
 - Added a source-list remove button and Shift/Ctrl multi-selection for removing sources and their timeline segments together.
 - Added a dockable video preview with paused first frame, playback controls, and scrubbing.
 - Linked clip selection across the source library, central lists, timeline, and preview.
@@ -21,6 +22,10 @@
 
 ### Fixed
 
+- Preserved manual timeline ordering and progress when imports contained no new videos.
+- Restricted source drops to local files and folders, preventing web URLs from importing the working directory.
+- Used copy semantics for source drops so importing never requests a file move.
+- Released Add Videos dialogs after accepting or cancelling them.
 - Replaced source multi-selection with the clicked clip even when its timeline segment or column row was already current, preventing unintended batch removal.
 - Cleared stale preview and clip controls after source deselection, and disabled single-clip movement for multiple selected sources.
 - Updated the central remove button label to reflect batch removal.
