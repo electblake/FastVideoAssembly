@@ -2,8 +2,11 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-24
+
 ### Added
 
+- Added a project skill defining functional, nonredundant UI text requirements.
 - Added saved hardware decoding and scaling selectors based on Windows GPU vendors and FFmpeg capabilities, with CPU/CUDA interpolation and Quick Sync scaling modes.
 - Exposed all seven NVENC presets, labeled Fastest through Slowest, with corresponding CPU H.264 presets.
 - Added Apply and Reset beside CPU filter threads, keeping edits pending until explicitly applied.
@@ -38,6 +41,7 @@
 
 ### Fixed
 
+- Included the timeline style module in the Windows installer so the installed application can import it.
 - Preserved saved hardware selections as unavailable when a GPU or FFmpeg capability disappears, preventing blank selectors from overwriting those settings.
 - Made GPU inventory command failures terminate detection instead of silently reporting missing capabilities.
 - Removed redundant hardware-control tooltip text.

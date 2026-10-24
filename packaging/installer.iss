@@ -36,6 +36,7 @@ Source: "..\src\fastvideoassembly\*.py"; DestDir: "{app}\application\src\fastvid
 Source: "..\src\fastvideoassembly\*.ico"; DestDir: "{app}\application\src\fastvideoassembly"; Flags: ignoreversion
 Source: "..\src\fastvideoassembly\icons\*.ico"; DestDir: "{app}\application\src\fastvideoassembly\icons"; Flags: ignoreversion
 Source: "..\src\fastvideoassembly\styles\*.qss"; DestDir: "{app}\application\src\fastvideoassembly\styles"; Flags: ignoreversion
+Source: "..\src\fastvideoassembly\styles\*.py"; DestDir: "{app}\application\src\fastvideoassembly\styles"; Flags: ignoreversion
 Source: "THIRD-PARTY.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uv.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "vendor.json"; DestDir: "{app}"; Flags: ignoreversion
