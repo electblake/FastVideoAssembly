@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-25
+
 ### Added
 
 - Added a Music Classification dock with editable Music and Talking candidates, independent thresholds, Apply buttons, mute checkboxes, and a saved worker count.
@@ -9,6 +11,8 @@
 - Added CPU ONNX and NVIDIA CUDA inference, GPU precision and device controls, an isolated CUDA dependency installer, and model downloads stored in the platform cache directory.
 - Added persistent per-clip mute controls in the preview and applied mute decisions during export.
 - Added classification throughput and ETA, rendering frame throughput, and audio-measurement throughput and ETA.
+- Added end-to-end checks for minimized, no-profile launches through the module entry point and headless launches with corrupt user settings.
+- Verified that no-profile sessions never resolve the user configuration path or open settings, and that regression launches remain minimized without taking focus.
 
 ### Changed
 

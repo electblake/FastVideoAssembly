@@ -93,7 +93,7 @@ def test_no_profile_leaves_user_settings_untouched(qtbot, tmp_path, monkeypatch,
     [], ["-NoProfile"], ["-Minimize"], ["-NoProfile", "-Minimize"],
     ["first.mp4", "-Minimize", "-NoProfile", "second.mp4"],
 ])
-def test_launchers_consume_no_profile_flag(monkeypatch, launcher, arguments):
+def test_launchers_consume_no_profile_and_minimize_flags(monkeypatch, launcher, arguments):
     monkeypatch.setattr(launcher.sys, "argv", ["fastvideoassembly", *arguments])
     application = Mock()
     qt_application = Mock()
@@ -121,7 +121,9 @@ def test_window_starts_minimized_without_activation(qtbot, minimize):
 
 def test_no_profile_never_opens_settings(qtbot, monkeypatch, tmp_path):
     settings = Mock()
+    config_path = Mock()
     monkeypatch.setattr(app, "QSettings", settings)
+    monkeypatch.setattr(app, "user_config_path", config_path)
     controller = app.Application(no_profile=True, minimize=True)
     qtbot.addWidget(controller.window)
     controller.window.show()
@@ -129,6 +131,7 @@ def test_no_profile_never_opens_settings(qtbot, monkeypatch, tmp_path):
     controller.save_active_state()
     controller.window.close()
     settings.assert_not_called()
+    config_path.assert_not_called()
     assert list(tmp_path.iterdir()) == []
 
 
@@ -147,7 +150,7 @@ def test_minimize_takes_precedence_over_saved_window_state(qtbot):
     restored.window.close()
 
 
-@pytest.mark.parametrize("module", ["app", "installed"])
+@pytest.mark.parametrize("module", ["app", "installed", "__main__"])
 def test_minimized_no_profile_launch_end_to_end(tmp_path, module):
     if module == "installed":
         tools = tmp_path / "tools/ffmpeg/ffmpeg-8.1.2-essentials_build/bin"
@@ -156,13 +159,15 @@ def test_minimized_no_profile_launch_end_to_end(tmp_path, module):
         shutil.copy2(shutil.which("ffprobe"), tools / "ffprobe.exe")
     script = '''
 import json
+import runpy
 import sys
 from pathlib import Path
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMainWindow
 from fastvideoassembly import app, installed
 
-launcher = {"app": app, "installed": installed}[sys.argv.pop(1)]
+module = sys.argv.pop(1)
+launcher = {"app": app, "installed": installed, "__main__": app}[module]
 profile = Path(sys.argv.pop(1))
 app.user_config_path = lambda *args, **kwargs: profile
 sys.prefix = str(profile.parent / "runtime/python")
@@ -182,6 +187,8 @@ class TestApplication(QApplication):
         return super().exec()
 
 launcher.QApplication = TestApplication
+if module == "__main__":
+    runpy.run_module("fastvideoassembly", run_name="__main__")
 raise SystemExit(launcher.main())
 '''
     result = subprocess.run(
@@ -192,3 +199,49 @@ raise SystemExit(launcher.main())
         "minimized": True, "show_without_activating": True, "active": False,
     }
     assert not (tmp_path / "profile").exists()
+
+
+def test_headless_module_launch_ignores_corrupt_profile(tmp_path, monkeypatch):
+    profile_path = tmp_path / "settings.ini"
+    original = b"[audio]\nmeasurements=invalid-json\n[output]\nproject=Saved project\n"
+    profile_path.write_bytes(original)
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    script = '''
+import runpy
+import sys
+from pathlib import Path
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+from fastvideoassembly import app
+
+profile = Path(sys.argv.pop(1))
+app.user_config_path = lambda *args, **kwargs: profile
+
+class TestApplication(QApplication):
+    def exec(self):
+        controller = next(child for child in self.allWidgets()
+                          if child.objectName() == "no-profile-test-window")
+        controller.close()
+        return 0
+
+class TestController(app.Application):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert self.project_name.text() == ""
+        assert self.normalization_cache == {}
+        assert self.window.isMinimized()
+        assert self.window.testAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.window.setObjectName("no-profile-test-window")
+        self.project_name.setText("Unsaved headless project")
+        self.save_active_state()
+
+app.QApplication = TestApplication
+app.Application = TestController
+runpy.run_module("fastvideoassembly", run_name="__main__")
+'''
+    subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), "-NoProfile", "-Minimize"],
+        capture_output=True, text=True, check=True, timeout=30,
+    )
+    assert profile_path.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [profile_path]
