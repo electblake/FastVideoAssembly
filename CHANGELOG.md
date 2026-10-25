@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-25
+
+### Added
+
+- Added an initial-load screenshot and application logo to the README.
+
+### Changed
+
+- Reduced the README to features, installer instructions, and documentation links.
+- Moved usage, development, and installer details into focused guides under `docs/`.
+
 ## [0.8.1] - 2026-10-25
 
 ### Added
