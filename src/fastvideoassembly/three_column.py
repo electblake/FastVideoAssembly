@@ -105,6 +105,9 @@ class ThreeColumnAssembly(QWidget):
         self.select_no_timelines_button = QPushButton("Select None")
         self.select_no_timelines_button.clicked.connect(controller.clear_timeline_selection)
         ordering_buttons.addWidget(self.select_no_timelines_button, 1, 1)
+        self.classify_timelines_button = QPushButton("Classify Music")
+        self.classify_timelines_button.clicked.connect(lambda: controller.classify_music(timelines=True))
+        ordering_buttons.addWidget(self.classify_timelines_button, 2, 0, 1, 2)
         self.sticky_timeline_selections = QCheckBox("Sticky timeline selections")
         self.sticky_timeline_selections.setChecked(
             controller.settings.value("assembly/stickyTimelineSelections", True, type=bool)
@@ -142,6 +145,9 @@ class ThreeColumnAssembly(QWidget):
             clip_buttons.addWidget(button, 0, index)
         clip_buttons.addWidget(self.select_none_button, 1, 0, 1, 2)
         clip_buttons.addWidget(self.remove_button, 1, 2, 1, 2)
+        self.classify_clips_button = QPushButton("Classify Music")
+        self.classify_clips_button.clicked.connect(lambda: controller.classify_music(timelines=False))
+        clip_buttons.addWidget(self.classify_clips_button, 2, 0, 1, 4)
         self.sticky_clip_selections = QCheckBox("Sticky clip selections")
         self.sticky_clip_selections.setChecked(
             controller.settings.value("assembly/stickyClipSelections", True, type=bool)

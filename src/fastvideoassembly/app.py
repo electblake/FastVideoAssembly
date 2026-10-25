@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import subprocess
 import sys
 import tempfile
 from dataclasses import asdict
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGraphicsProxyWidget,
@@ -47,6 +49,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStyle,
     QTabWidget,
@@ -72,7 +75,15 @@ from .assembly import (
     video_paths,
 )
 from .audio import mix_peak_arguments, normalization_filter, peak_measurement_arguments
+from .classification import (
+    BACKGROUND_LABELS,
+    GPU_MODEL_ID,
+    MODEL_FILE,
+    MODEL_ID,
+    WINDOW_SECONDS,
+)
 from .hardware import render_hardware
+from .music_runtime import model_cache_path
 from .preview import Preview
 from .settings import NoProfileSettings
 from .styles.timeline import TimelineClipStyle, TimelineTrackStyle
@@ -148,6 +159,22 @@ class Application(QObject):
         self.measurement_processes = {}
         self.normalization_cache = json.loads(self.settings.value("audio/measurements", "{}"))
         self.audio_gains = json.loads(self.settings.value("audio/gains", "{}"))
+        self.audio_muted = set(json.loads(self.settings.value("audio/muted", "[]")))
+        self.classification_cache = json.loads(self.settings.value("music/scores", "{}"))
+        self.classifying_music = False
+        self.classification_process = QProcess(self)
+        self.classification_process.readyReadStandardOutput.connect(self.read_classification)
+        self.classification_process.readyReadStandardError.connect(
+            lambda: self.log.appendPlainText(bytes(self.classification_process.readAllStandardError()).decode())
+        )
+        self.classification_process.finished.connect(self.classification_finished)
+        self.classification_timer = QTimer(self.window)
+        self.classification_timer.setInterval(1000)
+        self.classification_timer.timeout.connect(self.update_classification_progress)
+        self.music_setup_process = QProcess(self)
+        self.music_setup_process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.music_setup_process.readyReadStandardOutput.connect(self.read_music_setup)
+        self.music_setup_process.finished.connect(self.music_setup_finished)
         self.replace_outputs = set()
         self.runtime_timer = QTimer(self.window)
         self.runtime_timer.setInterval(1000)
@@ -288,6 +315,7 @@ class Application(QObject):
         view_menu.addAction(self.library_dock.toggleViewAction())
         self.preview = Preview()
         self.preview.gain_applied.connect(self.apply_clip_gain)
+        self.preview.mute_changed.connect(self.apply_clip_mute)
         self.preview_dock = QDockWidget("Preview", self.window)
         self.preview_dock.setObjectName("clipPreview")
         self.preview_dock.setWidget(self.preview)
@@ -301,6 +329,7 @@ class Application(QObject):
         )
         self.build_audio_settings(view_menu)
         self.build_output_settings(view_menu)
+        self.build_music_settings(view_menu)
 
         self.assembler_tabs = QTabWidget()
         self.assembler = ThreeColumnAssembly(self)
@@ -332,6 +361,260 @@ class Application(QObject):
         self.preview.activity.connect(self.window.statusBar().showMessage)
         self.preview.activity.connect(self.log_dock.show)
         view_menu.addAction(self.log_dock.toggleViewAction())
+
+    def build_music_settings(self, view_menu):
+        self.music_panel = QWidget()
+        form = QFormLayout(self.music_panel)
+        self.music_device = QComboBox()
+        self.music_device.addItem("CPU", "cpu")
+        self.music_device.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.music_device.setCurrentIndex(self.music_device.findData(self.settings.value("music/device", "cpu")))
+        form.addRow("Device:", self.music_device)
+        self.music_model = QLineEdit()
+        self.music_model.setReadOnly(True)
+        form.addRow("Model:", self.music_model)
+        self.music_precision = QComboBox()
+        form.addRow("Precision:", self.music_precision)
+        self.music_gpu_index = QSpinBox()
+        self.music_gpu_index.setRange(0, 2147483647)
+        self.music_gpu_index.setValue(self.settings.value("music/gpu_index", 0, type=int))
+        form.addRow("GPU index:", self.music_gpu_index)
+        self.install_music_dependencies = QPushButton("Install GPU Dependencies")
+        self.install_music_dependencies.clicked.connect(lambda: self.start_music_setup("install"))
+        form.addRow(self.install_music_dependencies)
+        model_actions = QHBoxLayout()
+        self.download_music_model = QPushButton("Download Model")
+        self.download_music_model.clicked.connect(lambda: self.start_music_setup("download"))
+        model_actions.addWidget(self.download_music_model)
+        self.open_music_cache = QPushButton("Open Model Cache")
+        self.open_music_cache.clicked.connect(self.open_model_cache)
+        model_actions.addWidget(self.open_music_cache)
+        form.addRow(model_actions)
+        self.music_cache_location = QLineEdit(str(model_cache_path()))
+        self.music_cache_location.setReadOnly(True)
+        form.addRow("Model cache:", self.music_cache_location)
+        self.music_device.currentIndexChanged.connect(self.music_device_changed)
+        self.music_precision.currentIndexChanged.connect(
+            lambda: self.settings.setValue("music/gpu_precision", self.music_precision.currentData())
+        )
+        self.music_gpu_index.valueChanged.connect(lambda value: self.settings.setValue("music/gpu_index", value))
+        self.music_device_changed()
+        self.music_label = QLineEdit(self.settings.value("music/label", "music"))
+        form.addRow("Music:", self.music_label)
+        self.music_threshold = QDoubleSpinBox()
+        self.music_threshold.setRange(0, 1)
+        self.music_threshold.setSingleStep(0.05)
+        self.music_threshold.setValue(self.settings.value("music/threshold", 0.5, type=float))
+        self.music_threshold.setAccessibleName("Music classification threshold")
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(self.music_threshold)
+        self.apply_music_threshold_button = QPushButton("Apply")
+        self.apply_music_threshold_button.clicked.connect(self.apply_music_threshold)
+        threshold_row.addWidget(self.apply_music_threshold_button)
+        form.addRow("Threshold:", threshold_row)
+        self.music_threads = QSpinBox()
+        self.music_threads.setRange(1, 2147483647)
+        self.music_threads.setValue(self.settings.value("music/threads", 1, type=int))
+        self.music_threads.setAccessibleName("Music classification threads")
+        form.addRow("Threads:", self.music_threads)
+        self.mute_music = QCheckBox("Mute music clips")
+        self.mute_music.setChecked(self.settings.value("music/mute", True, type=bool))
+        form.addRow(self.mute_music)
+        self.talking_label = QLineEdit(self.settings.value("talking/label", "talking"))
+        form.addRow("Talking:", self.talking_label)
+        self.talking_threshold = QDoubleSpinBox()
+        self.talking_threshold.setRange(0, 1)
+        self.talking_threshold.setSingleStep(0.05)
+        self.talking_threshold.setValue(self.settings.value("talking/threshold", 0.5, type=float))
+        self.talking_threshold.setAccessibleName("Talking classification threshold")
+        talking_threshold_row = QHBoxLayout()
+        talking_threshold_row.addWidget(self.talking_threshold)
+        self.apply_talking_threshold_button = QPushButton("Apply")
+        self.apply_talking_threshold_button.clicked.connect(self.apply_music_threshold)
+        talking_threshold_row.addWidget(self.apply_talking_threshold_button)
+        form.addRow("Threshold:", talking_threshold_row)
+        self.mute_talking = QCheckBox("Mute talking clips")
+        self.mute_talking.setChecked(self.settings.value("talking/mute", False, type=bool))
+        form.addRow(self.mute_talking)
+        self.talking_label.textChanged.connect(lambda value: self.settings.setValue("talking/label", value))
+        self.talking_threshold.valueChanged.connect(lambda value: self.settings.setValue("talking/threshold", value))
+        self.mute_talking.toggled.connect(lambda value: self.settings.setValue("talking/mute", value))
+        self.music_label.textChanged.connect(lambda value: self.settings.setValue("music/label", value))
+        self.music_threshold.valueChanged.connect(lambda value: self.settings.setValue("music/threshold", value))
+        self.music_threads.valueChanged.connect(lambda value: self.settings.setValue("music/threads", value))
+        self.mute_music.toggled.connect(lambda value: self.settings.setValue("music/mute", value))
+        self.music_dock = QDockWidget("Music Classification", self.window)
+        self.music_dock.setObjectName("musicClassification")
+        music_scroll = QScrollArea()
+        music_scroll.setWidgetResizable(True)
+        music_scroll.setWidget(self.music_panel)
+        self.music_dock.setWidget(music_scroll)
+        self.window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.music_dock)
+        self.window.splitDockWidget(self.audio_dock, self.music_dock, Qt.Orientation.Vertical)
+        view_menu.addAction(self.music_dock.toggleViewAction())
+
+    def music_device_changed(self):
+        gpu = self.music_device.currentData() == "cuda"
+        self.settings.setValue("music/device", self.music_device.currentData())
+        self.music_model.setText(GPU_MODEL_ID if gpu else MODEL_ID)
+        self.music_precision.blockSignals(True)
+        self.music_precision.clear()
+        self.music_precision.addItem("FP16", "float16")
+        if gpu:
+            self.music_precision.addItem("FP32", "float32")
+            self.music_precision.setCurrentIndex(self.music_precision.findData(
+                self.settings.value("music/gpu_precision", "float16")))
+        self.music_precision.blockSignals(False)
+        self.music_precision.setEnabled(gpu)
+        self.music_gpu_index.setEnabled(gpu)
+        self.install_music_dependencies.setEnabled(gpu)
+
+    def open_model_cache(self):
+        directory = model_cache_path()
+        directory.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
+    def start_music_setup(self, operation):
+        self.music_setup_operation = operation
+        self.running = True
+        self.classifying_music = True
+        self.update_enabled()
+        self.log_dock.show()
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("GPU dependencies - %p%" if operation == "install" else "Model download - %p%")
+        self.window.statusBar().showMessage(
+            "Installing GPU dependencies" if operation == "install" else "Downloading classification model")
+        arguments = ["-m", "fastvideoassembly.music_runtime", operation]
+        if operation == "download":
+            arguments.append(self.music_device.currentData())
+        self.music_setup_process.start(sys.executable, arguments)
+
+    def read_music_setup(self):
+        self.log.appendPlainText(bytes(self.music_setup_process.readAllStandardOutput()).decode())
+
+    def music_setup_finished(self, exit_code, exit_status):
+        self.read_music_setup()
+        self.running = False
+        self.classifying_music = False
+        self.progress.setRange(0, 1)
+        self.progress.setValue(int(exit_code == 0))
+        self.update_enabled()
+        subprocess.CompletedProcess([self.music_setup_process.program(),
+            *self.music_setup_process.arguments()], exit_code).check_returncode()
+        self.window.statusBar().showMessage(
+            "GPU dependencies installed" if self.music_setup_operation == "install" else "Model downloaded")
+
+    def apply_music_threshold(self):
+        for clip in self.clips:
+            if isinstance(clip, Clip) and clip.has_audio:
+                key = json.dumps(["music-v2", MODEL_ID, MODEL_FILE, WINDOW_SECONDS,
+                                  {"music": self.music_label.text(), "talking": self.talking_label.text()}, BACKGROUND_LABELS, self.source_audio_key(clip)])
+                if self.music_device.currentData() == "cuda":
+                    key = json.dumps(["music-gpu-v2", GPU_MODEL_ID, self.music_precision.currentData(),
+                                      WINDOW_SECONDS, {"music": self.music_label.text(), "talking": self.talking_label.text()}, BACKGROUND_LABELS,
+                                      self.source_audio_key(clip)])
+                if key in self.classification_cache:
+                    path = str(clip.path)
+                    if ((self.mute_music.isChecked() and self.classification_cache[key]["music"] >= self.music_threshold.value())
+                            or (self.mute_talking.isChecked() and self.classification_cache[key]["talking"] >= self.talking_threshold.value())):
+                        self.audio_muted.add(path)
+                    else:
+                        self.audio_muted.discard(path)
+        self.save_active_state()
+        self.update_preview_audio()
+        self.update_enabled()
+
+    def classify_music(self, timelines=False):
+        clips = (list(dict.fromkeys(clip for index in self.target_timelines
+                                   for clip in self.assembler.tracks[index])) if timelines
+                 else [clip for clip in self.clips if clip in self.selected_clips])
+        clips = [clip for clip in clips if isinstance(clip, Clip) and clip.has_audio]
+        self.classification_buffer = ""
+        self.classification_completed = 0
+        self.classification_scanned = 0
+        self.progress.setRange(0, len(clips))
+        self.progress.setValue(0)
+        self.progress.setFormat("Music Classification - %v / %m - 0.0 it/s - ETA --:--:--")
+        self.log_dock.show()
+        pending = []
+        for clip in clips:
+            key = json.dumps(["music-v2", MODEL_ID, MODEL_FILE, WINDOW_SECONDS,
+                              {"music": self.music_label.text(), "talking": self.talking_label.text()}, BACKGROUND_LABELS, self.source_audio_key(clip)])
+            if self.music_device.currentData() == "cuda":
+                key = json.dumps(["music-gpu-v2", GPU_MODEL_ID, self.music_precision.currentData(),
+                                  WINDOW_SECONDS, {"music": self.music_label.text(), "talking": self.talking_label.text()}, BACKGROUND_LABELS,
+                                  self.source_audio_key(clip)])
+            if key in self.classification_cache:
+                self.apply_music_score(str(clip.path), self.classification_cache[key])
+            else:
+                pending.append({"key": key, "path": str(clip.path), "duration": clip.duration})
+        self.classification_started = monotonic()
+        self.update_classification_progress()
+        if not pending:
+            self.save_active_state()
+            self.update_preview_audio()
+            self.update_enabled()
+            self.window.statusBar().showMessage("Music Classification complete")
+            return
+        self.classifying_music = True
+        self.stop_requested = False
+        self.running = True
+        self.classification_timer.start()
+        self.update_enabled()
+        self.window.statusBar().showMessage("Classifying music")
+        arguments = (["-m", "fastvideoassembly.music_runtime", "classify"]
+                     if self.music_device.currentData() == "cuda"
+                     else ["-m", "fastvideoassembly.classification"])
+        self.classification_process.start(sys.executable, arguments)
+        self.classification_process.write(json.dumps({"ffmpeg": self.ffmpeg,
+            "labels": {"music": self.music_label.text(), "talking": self.talking_label.text()}, "threads": self.music_threads.value(), "clips": pending,
+            "device": self.music_device.currentData(), "precision": self.music_precision.currentData(),
+            "gpu_index": self.music_gpu_index.value(), "cache_dir": str(model_cache_path())}).encode())
+        self.classification_process.closeWriteChannel()
+
+    def apply_music_score(self, path, score):
+        if ((self.mute_music.isChecked() and score["music"] >= self.music_threshold.value())
+                or (self.mute_talking.isChecked() and score["talking"] >= self.talking_threshold.value())):
+            self.audio_muted.add(path)
+        self.classification_completed += 1
+        self.progress.setValue(self.classification_completed)
+        self.log.appendPlainText(
+            f"{path}: {self.music_label.text()} {score['music']:.3f}, "
+            f"{self.talking_label.text()} {score['talking']:.3f}")
+
+    def update_classification_progress(self):
+        elapsed = monotonic() - self.classification_started
+        rate = self.classification_scanned / elapsed if self.classification_scanned else 0.0
+        remaining = self.progress.maximum() - self.classification_completed
+        eta = (timestamp(remaining / rate) if self.classification_scanned else "--:--:--") if remaining else "00:00:00"
+        self.progress.setFormat(f"Music Classification - %v / %m - {rate:.1f} it/s - ETA {eta}")
+
+    def read_classification(self):
+        self.classification_buffer += bytes(self.classification_process.readAllStandardOutput()).decode()
+        while "\n" in self.classification_buffer:
+            line, self.classification_buffer = self.classification_buffer.split("\n", 1)
+            result = json.loads(line)
+            self.classification_cache[result["key"]] = result["score"]
+            self.classification_scanned += 1
+            self.apply_music_score(result["path"], result["score"])
+            self.update_classification_progress()
+            self.save_active_state()
+
+    def classification_finished(self, exit_code, exit_status):
+        self.read_classification()
+        self.classification_timer.stop()
+        self.update_classification_progress()
+        self.running = False
+        self.classifying_music = False
+        self.update_enabled()
+        self.update_preview_audio()
+        if self.stop_requested:
+            self.progress.setFormat("Music Classification stopped - %v / %m")
+            self.window.statusBar().showMessage("Music Classification stopped")
+        else:
+            subprocess.CompletedProcess([self.classification_process.program(),
+                *self.classification_process.arguments()], exit_code).check_returncode()
+            self.window.statusBar().showMessage("Music Classification complete")
 
     def copy_log(self):
         self.log.selectAll()
@@ -389,7 +672,7 @@ class Application(QObject):
         saved = RenderConfig(**{
             key: self.settings.value(f"render/{key}", value, type=type(value))
             for key, value in asdict(RenderConfig()).items()
-            if key != "audio_gains"
+            if key not in ("audio_gains", "audio_muted")
         })
         self.resolution.setCurrentIndex(
             self.resolution.findData([saved.column_width * self.settings.value("assembly/columns", 3, type=int), saved.height])
@@ -608,7 +891,8 @@ class Application(QObject):
         self.normalize_button.setEnabled(
             not self.loading and not self.running
             and self.audio_codec.currentData() != "none" and mode == "True Peak"
-            and any(isinstance(clip, Clip) and clip.has_audio for clip in self.clips)
+            and any(isinstance(clip, Clip) and clip.has_audio and str(clip.path) not in self.audio_muted
+                    for clip in self.clips)
         )
         self.analysis_workers.setEnabled(self.audio_codec.currentData() != "none" and mode == "True Peak")
         self.settings.setValue("audio/analysis_workers", self.analysis_workers.value())
@@ -633,6 +917,7 @@ class Application(QObject):
             self.scaling_algorithm.currentData(),
             self.qsv_scaling_mode.currentData(),
             dict(self.audio_gains),
+            set(self.audio_muted),
         )
 
     def apply_filter_threads(self):
@@ -643,7 +928,7 @@ class Application(QObject):
         self.scaling_algorithm.setEnabled(self.scaler.currentData() in ("cpu", "cuda"))
         self.qsv_scaling_mode.setEnabled(self.scaler.currentData() == "qsv")
         for key, value in asdict(self.render_config()).items():
-            if key != "audio_gains":
+            if key not in ("audio_gains", "audio_muted"):
                 self.settings.setValue(f"render/{key}", value)
         self.settings.setValue("render/combine", self.combine.isChecked())
         self.refresh()
@@ -732,6 +1017,8 @@ class Application(QObject):
         self.settings.endArray()
         self.settings.setValue("audio/measurements", json.dumps(self.normalization_cache))
         self.settings.setValue("audio/gains", json.dumps(self.audio_gains))
+        self.settings.setValue("audio/muted", json.dumps(sorted(self.audio_muted)))
+        self.settings.setValue("music/scores", json.dumps(self.classification_cache))
         self.settings.sync()
 
     def create_timelines(self):
@@ -1073,6 +1360,11 @@ class Application(QObject):
         level = "No audio" if isinstance(clip, Clip) else ""
         source_level = ""
         audio_filter = "anull"
+        muted = clip is not None and str(clip.path) in self.audio_muted
+        self.preview.mute_checkbox.blockSignals(True)
+        self.preview.mute_checkbox.setChecked(muted)
+        self.preview.mute_checkbox.blockSignals(False)
+        self.preview.audio.setMuted(muted)
         if enabled:
             mode = self.normalization.currentText()
             level = "True peak: Not measured"
@@ -1095,6 +1387,9 @@ class Application(QObject):
             if peak is not None and (mode != "YouTube" or manual):
                 level = f"Estimated true peak: {peak + gain:.2f} dBTP"
         self.preview.audio_level.setToolTip(source_level)
+        if muted:
+            audio_filter = "anull"
+            level = ""
         self.preview.set_audio(gain, level, audio_filter,
                                enabled and not self.running and not self.loading, self.ffmpeg)
 
@@ -1102,6 +1397,16 @@ class Application(QObject):
         self.audio_gains[str(self.selected_clip.path)] = gain
         self.save_active_state()
         self.update_preview_audio()
+
+    def apply_clip_mute(self, muted):
+        path = str(self.selected_clip.path)
+        if muted:
+            self.audio_muted.add(path)
+        else:
+            self.audio_muted.remove(path)
+        self.save_active_state()
+        self.update_preview_audio()
+        self.update_enabled()
 
     def remove_selected_clip(self):
         paths = {
@@ -1170,6 +1475,11 @@ class Application(QObject):
         self.assembler.balance_button.setEnabled(idle and scanned)
         self.assembler.longest_button.setEnabled(idle and scanned)
         self.assembler.shuffle_button.setEnabled(idle and scanned)
+        self.music_panel.setEnabled(idle)
+        self.assembler.classify_clips_button.setEnabled(idle and any(
+            isinstance(clip, Clip) and clip.has_audio for clip in self.selected_clips))
+        self.assembler.classify_timelines_button.setEnabled(idle and any(
+            clip.has_audio for index in self.target_timelines for clip in self.assembler.tracks[index]))
         self.assembler.create_button.setEnabled(idle and bool(self.clips))
         self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
@@ -1179,9 +1489,10 @@ class Application(QObject):
                                                 and (self.combine.isChecked() or self.assembler.render_timelines.isChecked()))
         for checkbox in self.assembler.division_checkboxes:
             checkbox.setEnabled(idle)
-        self.assembler.pause_button.setEnabled(self.running)
+        self.assembler.pause_button.setEnabled(self.running and not self.classifying_music)
         self.assembler.pause_button.setText("Resume" if self.render_paused else "Pause")
-        self.assembler.stop_button.setEnabled(self.running)
+        self.assembler.stop_button.setEnabled(self.running and
+                                             (not self.classifying_music or self.classification_timer.isActive()))
         self.render_panel.setEnabled(idle)
         self.combine.setEnabled(idle)
         self.assembler.render_timelines.setEnabled(idle)
@@ -1194,7 +1505,8 @@ class Application(QObject):
         self.normalize_button.setEnabled(
             idle and self.audio_codec.currentData() != "none"
             and self.normalization.currentText() == "True Peak"
-            and any(isinstance(clip, Clip) and clip.has_audio for clip in self.clips)
+            and any(isinstance(clip, Clip) and clip.has_audio and str(clip.path) not in self.audio_muted
+                    for clip in self.clips)
         )
         self.output_panel.setEnabled(idle)
         self.library.setEnabled(idle)
@@ -1244,7 +1556,7 @@ class Application(QObject):
         self.replace_outputs = set()
         self.normalizing_audio = True
         for clip in self.clips:
-            if isinstance(clip, Clip) and clip.has_audio:
+            if isinstance(clip, Clip) and clip.has_audio and str(clip.path) not in self.audio_muted:
                 cache_key = json.dumps(["source-v1", self.source_audio_key(clip)])
                 if cache_key in self.normalization_cache:
                     self.audio_peaks[clip.path] = float(self.normalization_cache[cache_key])
@@ -1341,6 +1653,7 @@ class Application(QObject):
                         config.audio_codec != "none"
                         and config.normalization == "True Peak"
                         and clip.has_audio
+                        and str(clip.path) not in config.audio_muted
                         and str(clip.path) not in config.audio_gains
                         and clip.path not in scheduled_measurements
                     ):
@@ -1370,12 +1683,15 @@ class Application(QObject):
                 graph_path = graph_root / f"composition{division_start // columns_per_division}.ffgraph"
                 if config.audio_codec != "none" and config.normalization == "True Peak":
                     cache_key = json.dumps([
-                        "mix-v2", render_timelines, config.audio_codec, config.fps,
+                        "mix-v3", render_timelines, config.audio_codec, config.fps,
                         [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config),
-                          config.audio_gains.get(str(clip.path))]
+                          config.audio_gains.get(str(clip.path)), str(clip.path) in config.audio_muted]
                           for clip in track] for track in group_tracks],
                     ])
-                    if cache_key in self.normalization_cache:
+                    if not any(clip.has_audio and str(clip.path) not in config.audio_muted
+                               for track in group_tracks for clip in track):
+                        self.audio_peaks[output] = -math.inf
+                    elif cache_key in self.normalization_cache:
                         self.audio_peaks[output] = float(self.normalization_cache[cache_key])
                     else:
                         self.measurement_cache_keys[len(self.export_jobs)] = cache_key
@@ -1438,6 +1754,7 @@ class Application(QObject):
             self.progress.setRange(0, 1000)
             self.progress.setValue(0)
         self.stage_seconds = 0.0
+        self.stage_started = monotonic()
         self.render_frames_per_second = 0.0
         self.progress_buffer = ""
         path, self.stage_duration, args = self.export_jobs[self.export_index]
@@ -1559,7 +1876,10 @@ class Application(QObject):
         self.log_dock.show()
         self.log.appendPlainText("Stop requested. Waiting for active work to exit")
         self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")
-        if self.render_waiting:
+        if self.classifying_music:
+            subprocess.run(["taskkill", "/PID", str(self.classification_process.processId()), "/T", "/F"],
+                           check=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        elif self.render_waiting:
             self.end_export("Rendering stopped")
         elif self.measurement_processes:
             for process in list(self.measurement_processes):
@@ -1596,12 +1916,17 @@ class Application(QObject):
         completed = sum(job[1] for job in self.export_jobs[self.group_start:self.export_index]) + self.stage_seconds
         eta = timestamp(elapsed_seconds * (total - completed) / completed) if completed else "--:--:--"
         if self.measuring_audio:
+            rate = self.stage_seconds / (monotonic() - self.stage_started) if self.stage_seconds else 0.0
+            remaining = sum(self.export_jobs[index][1] for index in self.measurement_seconds) - self.stage_seconds
+            audio_eta = timestamp(remaining / rate) if self.stage_seconds else "--:--:--"
             self.progress.setFormat(
                 f"{self.group_name} - Measuring audio" + (" - %p%" if self.stage_seconds else "")
+                + f" - {rate:.1f} s/s - ETA {audio_eta}"
             )
         else:
+            timing = f"Runtime {elapsed}" if completed / total < 0.49 else f"ETA {eta}"
             self.progress.setFormat(
-                f"{self.group_name} - %p% - ETA {eta} - {self.render_frames_per_second:.1f} frames/s"
+                f"{self.group_name} - %p% - {self.render_frames_per_second:.1f} it/s - {timing}"
             )
         if self.stop_requested:
             self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")

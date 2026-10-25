@@ -225,36 +225,45 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
     controller.measurement_keys = {}
     controller.export_index = 0
     controller.start_export_job()
-    assert "ETA --:--:--" in controller.progress.text()
-    assert "Runtime" not in controller.progress.text()
+    assert "Runtime 00:00:00" in controller.progress.text()
+    assert "ETA" not in controller.progress.text()
     assert "Runtime 00:00:00" in controller.window.statusBar().currentMessage()
     assert "ETA" not in controller.window.statusBar().currentMessage()
     clock[0] = 110
     process.readAllStandardOutput.return_value = b"out_time_us=50000000\n"
     controller.read_progress()
     assert controller.progress.value() == 250
-    assert "ETA 00:00:30" in controller.progress.text()
+    assert "Runtime 00:00:10" in controller.progress.text()
     assert "Runtime 00:00:10" in controller.window.statusBar().currentMessage()
     clock[0] = 111
     controller.runtime_timer.timeout.emit()
-    assert "ETA 00:00:33" in controller.progress.text()
+    assert "Runtime 00:00:11" in controller.progress.text()
     assert "Runtime 00:00:11" in controller.window.statusBar().currentMessage()
     assert controller.progress.value() == 250
+    process.readAllStandardOutput.return_value = b"out_time_us=97900000\n"
+    controller.read_progress()
+    assert "Runtime 00:00:11" in controller.progress.text()
+    assert "ETA" not in controller.progress.text()
+    process.readAllStandardOutput.return_value = b"out_time_us=98000000\n"
+    controller.read_progress()
+    assert controller.progress.value() == 490
+    assert "ETA 00:00:11" in controller.progress.text()
+    assert "Runtime" not in controller.progress.text()
     controller.export_index = 1
     controller.start_export_job()
     assert controller.progress.value() == 500
-    assert controller.progress.text().endswith(" - 0.0 frames/s")
+    assert " - 0.0 it/s - ETA " in controller.progress.text()
     clock[0] = 120
     process.readAllStandardOutput.return_value = b"fps=147.25\nout_time_us=50000000\n"
     controller.read_progress()
     assert controller.progress.value() == 750
-    assert controller.progress.text().endswith(" - 147.2 frames/s")
+    assert " - 147.2 it/s - ETA " in controller.progress.text()
     process.readAllStandardOutput.return_value = b"fps=98."
     controller.read_progress()
-    assert controller.progress.text().endswith(" - 147.2 frames/s")
+    assert " - 147.2 it/s - ETA " in controller.progress.text()
     process.readAllStandardOutput.return_value = b"75\n"
     controller.read_progress()
-    assert controller.progress.text().endswith(" - 98.8 frames/s")
+    assert " - 98.8 it/s - ETA " in controller.progress.text()
     process.readAllStandardOutput.return_value = b"out_time_us=0\n"
     controller.read_progress()
     assert controller.progress.value() == 750
@@ -263,8 +272,8 @@ def test_progress_and_eta_span_timeline_jobs(controller, tmp_path, monkeypatch):
         controller.start_export_job()
         assert controller.progress.value() == 0
         assert controller.progress.text().startswith(name)
-        assert "ETA --:--:--" in controller.progress.text()
-        assert controller.progress.text().endswith(" - 0.0 frames/s")
+        assert "Runtime 00:00:00" in controller.progress.text()
+        assert " - 0.0 it/s - Runtime " in controller.progress.text()
         assert "Runtime 00:00:00" in controller.window.statusBar().currentMessage()
 
 
@@ -1096,7 +1105,10 @@ def test_audio_progress_tracks_timestamps_and_stalled_activity(controller, tmp_p
     controller.read_measurement(workers[0])
     value = controller.progress.value()
     assert value == 200 // worker_count
-    assert controller.progress.text() == f"FINAL - Measuring audio - {20 // worker_count}%"
+    assert controller.progress.text() == (
+        f"FINAL - Measuring audio - {20 // worker_count}% - 10.0 s/s - ETA "
+        + ("00:00:08" if worker_count == 1 else "00:00:18")
+    )
     status = controller.window.statusBar().currentMessage()
     assert status == "Measuring audio - audio0.mp4"
     assert "Measured audio audio0.mp4: 20.0 / 100.0 s" in controller.log.toPlainText()

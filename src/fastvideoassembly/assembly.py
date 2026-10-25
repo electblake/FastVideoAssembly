@@ -111,8 +111,11 @@ class RenderConfig:
     scaling_algorithm: str = "bicubic"
     qsv_scaling_mode: str = "hq"
     audio_gains: dict = field(default_factory=dict)
+    audio_muted: set = field(default_factory=set)
 
     def source_audio_filter(self, clip, peaks):
+        if str(clip.path) in self.audio_muted:
+            return "volume=0"
         if str(clip.path) in self.audio_gains:
             return normalization_filter(self.normalization, gain=self.audio_gains[str(clip.path)])
         peak = peaks[clip.path] if self.normalization == "True Peak" else None
@@ -249,7 +252,7 @@ def column_arguments(track, output, graph_path, config, peaks=None):
         )
         inputs.append(f"[v{index}]")
         if config.audio_codec != "none":
-            if clip.has_audio:
+            if clip.has_audio and str(clip.path) not in config.audio_muted:
                 normalize = config.source_audio_filter(clip, peaks)
                 filters.append(
                     f"[{index}:a:0]aresample=48000:async=1:first_pts=0,"
@@ -342,7 +345,7 @@ def division_arguments(tracks, duration, output, graph_path, config, peaks, peak
                 )
                 inputs.append(f"[v{index}]")
             if audio:
-                if clip.has_audio:
+                if clip.has_audio and str(clip.path) not in config.audio_muted:
                     normalize = config.source_audio_filter(clip, peaks)
                     if measure or audio_only:
                         manifest = Path(graph_path).with_name(f"{Path(graph_path).stem}-{index}.ffconcat")

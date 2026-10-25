@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Music Classification dock with editable Music and Talking candidates, independent thresholds, Apply buttons, mute checkboxes, and a saved worker count.
+- Added classification of selected clips and timelines, with cached scores reused across scans and restarts and threshold changes applied without rescanning.
+- Added CPU ONNX and NVIDIA CUDA inference, GPU precision and device controls, an isolated CUDA dependency installer, and model downloads stored in the platform cache directory.
+- Added persistent per-clip mute controls in the preview and applied mute decisions during export.
+- Added classification throughput and ETA, rendering frame throughput, and audio-measurement throughput and ETA.
+
+### Changed
+
+- Displayed rendering runtime below 49% progress before switching to an estimated countdown.
+- Scored music and talking together; invalidated older single-candidate scores and cached results when candidates, sources, or inference settings changed.
+
+### Fixed
+
+- Excluded muted clips from source normalization measurements, preserved silence during export, and included mute state in final-mix cache identities.
+- Gave classification threads separate models and serialized model initialization.
+- Classified only actual decoded audio samples, avoiding empty windows when an audio track ended before its video.
+- Decoded audio into temporary storage and read bounded windows instead of keeping entire clips in memory.
+- Bounded queued classification work so a failed result no longer left the entire scan queued behind thread-pool shutdown.
+- Enabled Stop during classification, terminated its process tree, preserved completed scores and mute decisions, and replaced the stopped scan's ETA with its stopped state.
+
 ## [0.8.0] - 2026-10-24
 
 ### Added

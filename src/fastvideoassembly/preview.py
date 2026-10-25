@@ -8,6 +8,7 @@ from PySide6.QtCore import QProcess, Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -22,6 +23,7 @@ from shiboken6 import delete
 class Preview(QWidget):
     activity = Signal(str)
     gain_applied = Signal(float)
+    mute_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -61,6 +63,9 @@ class Preview(QWidget):
         self.audio_controls = QWidget()
         audio_layout = QVBoxLayout(self.audio_controls)
         audio_layout.setContentsMargins(0, 0, 0, 0)
+        self.mute_checkbox = QCheckBox("Mute")
+        self.mute_checkbox.toggled.connect(self.mute_changed)
+        audio_layout.addWidget(self.mute_checkbox)
         self.audio_level = QLabel()
         audio_layout.addWidget(self.audio_level)
         gain_row = QHBoxLayout()
