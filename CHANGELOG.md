@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-10-26
+
+### Fixed
+
+- Skipped videos rejected by FFprobe, removed them from project sources without deleting files, and recorded their paths and errors in Activity.
+- Released failed scan workers so remaining videos finish scanning and Stop can complete, preserving progress when scanning resumes.
+- Stopped adding empty Activity entries after successful video scans.
+
 ## [0.8.2] - 2026-10-25
 
 ### Added

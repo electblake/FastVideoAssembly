@@ -660,6 +660,63 @@ def test_parallel_source_scanning(
     assert sum(map(len, controller.assembler.tracks)) == len(paths) + 1
 
 
+@pytest.mark.profile
+@pytest.mark.parametrize("workers,stop", [(1, False), (2, False), (2, True)])
+def test_invalid_video_removed_and_scanning_continues(
+    controller, preview_source, tmp_path, qtbot, workers, stop
+):
+    invalid = tmp_path / "invalid.mp4"
+    invalid.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+    valid = [tmp_path / f"valid{i}.mp4" for i in range(3)]
+    for path in valid:
+        path.hardlink_to(preview_source)
+    controller.scan_threads.setValue(workers)
+    controller.add_paths([invalid, *valid])
+    controller.selected_clip = controller.clips[0]
+    controller.create_timelines()
+    if stop:
+        controller.stop_scanning()
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert not controller.probing_paths
+    assert [clip.path for clip in controller.clips] == valid
+    assert controller.selected_clip is None
+    assert invalid.exists()
+    log = controller.log.toPlainText()
+    assert f"Skipped and removed from sources: {invalid}" in log
+    assert "moov atom not found" in log
+    assert "\n\n" not in log
+    assert controller.settings.value("sources/paths") == [str(path) for path in valid]
+    if stop:
+        assert "Scanning stopped" in log
+        assert controller.pending == valid[1:]
+        assert controller.assembler.create_button.isEnabled()
+        controller.assembler.keep_logs.setChecked(True)
+        controller.create_timelines()
+        qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert all(isinstance(clip, Clip) for clip in controller.clips)
+    assert sum(map(len, controller.assembler.tracks)) == len(valid)
+    assert controller.progress.value() == controller.progress.maximum()
+    assert not controller.pending
+    assert not controller.probing_paths
+    assert "Scanning completed" in controller.log.toPlainText()
+
+
+def test_all_invalid_videos_finish_with_empty_timelines(controller, tmp_path, qtbot):
+    paths = [tmp_path / f"invalid{i}.mp4" for i in range(3)]
+    for path in paths:
+        path.write_bytes(b"invalid video")
+    controller.add_paths(paths)
+    controller.create_timelines()
+    qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
+    assert controller.clips == []
+    assert not any(controller.assembler.tracks)
+    assert not controller.probing_paths
+    assert not controller.pending
+    assert controller.progress.value() == controller.progress.maximum() == len(paths)
+    assert controller.log.toPlainText().count("Skipped and removed from sources:") == len(paths)
+    assert "Scanning completed" in controller.log.toPlainText()
+
+
 def test_parallel_scan_out_of_order_waits_for_all_workers(controller, tmp_path, monkeypatch):
     import json
 

@@ -1113,14 +1113,24 @@ class Application(QObject):
         self.probe_next()
 
     def probed(self, probe, exit_code, exit_status):
-        self.log.appendPlainText(bytes(probe.readAllStandardError()).decode())
-        clip = clip_from_probe(
-            self.probing_paths[probe], json.loads(bytes(probe.readAllStandardOutput()))
-        )
-        index = next(i for i, source in enumerate(self.clips) if source.path == clip.path)
-        if self.selected_clip == self.clips[index]:
-            self.selected_clip = clip
-        self.clips[index] = clip
+        path = self.probing_paths[probe]
+        stderr = bytes(probe.readAllStandardError()).decode().strip()
+        stdout = bytes(probe.readAllStandardOutput())
+        index = next(i for i, source in enumerate(self.clips) if source.path == path)
+        if exit_code != 0:
+            self.log.appendPlainText(f"Skipped and removed from sources: {path}")
+            if self.selected_clip == self.clips[index]:
+                self.selected_clip = None
+                self.preview.player.stop()
+                self.preview.set_clip(None)
+            del self.clips[index]
+        else:
+            clip = clip_from_probe(path, json.loads(stdout))
+            if self.selected_clip == self.clips[index]:
+                self.selected_clip = clip
+            self.clips[index] = clip
+        if stderr:
+            self.log.appendPlainText(stderr)
         self.save_active_state()
         self.progress.setValue(self.progress.value() + 1)
         self.scan_completed += 1
