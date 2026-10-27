@@ -11,6 +11,8 @@
 
 ## Checks
 
+Follow [the test execution and lifecycle policy](../AGENTS.md#test-execution-and-scope) when adding, running, or retiring tests.
+
 - Run `uv run pytest` and `uv run ruff check .`.
 - Keep regression coverage in three domain suites: `tests/test_app.py` (editing, preview, persistence, export), `tests/test_media.py` (assembly, timeline ordering, rendered frames, audio), and `tests/test_services.py` (classification workers, runtime setup, hardware selection, updates).
 - Test related actions as one workflow using the same application instance. Create another instance only to verify restart behavior; keep separate workflows independent.
