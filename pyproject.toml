@@ -1,6 +1,6 @@
 [project]
 name = "fastvideoassembly"
-version = "0.8.3"
+version = "0.8.4"
 description = "Assemble portrait videos into balanced side-by-side timelines"
 readme = "README.md"
 license = "MIT"

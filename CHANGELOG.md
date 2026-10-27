@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-10-26
+
+### Changed
+
+- Separated CPU and CUDA classification thread settings, defaulting CUDA to one worker independently of the saved CPU thread count.
+
+### Fixed
+
+- Handled classification failures caused by a missing GPU Python launcher, preserved the original error in Activity, and directed users to Install GPU Dependencies.
+- Marked affected classification runs as failed and restored the controls for installing dependencies and running classification again.
+
 ## [0.8.3] - 2026-10-26
 
 ### Fixed

@@ -23,7 +23,14 @@ def test_device_controls_and_restart(controller, qtbot):
     assert controller.music_device.currentData() == "cpu"
     assert not controller.install_music_dependencies.isEnabled()
     assert not controller.music_precision.isEnabled()
+    assert controller.music_threads.isEnabled()
+    assert not controller.music_gpu_threads.isEnabled()
+    controller.music_threads.setValue(8)
     controller.music_device.setCurrentIndex(1)
+    assert controller.music_gpu_threads.value() == 1
+    assert controller.music_gpu_threads.isEnabled()
+    assert not controller.music_threads.isEnabled()
+    controller.music_gpu_threads.setValue(2)
     assert controller.install_music_dependencies.isEnabled()
     assert controller.music_precision.isEnabled()
     assert controller.music_model.text() == GPU_MODEL_ID
@@ -39,6 +46,8 @@ def test_device_controls_and_restart(controller, qtbot):
     assert restored.music_device.currentData() == "cuda"
     assert restored.music_precision.currentData() == "float32"
     assert restored.music_gpu_index.value() == 2
+    assert restored.music_threads.value() == 8
+    assert restored.music_gpu_threads.value() == 2
 
 
 def test_gpu_requests_and_precision_cache(controller, preview_source, monkeypatch, qtbot):
@@ -48,6 +57,7 @@ def test_gpu_requests_and_precision_cache(controller, preview_source, monkeypatc
     controller.select_clip(clip)
     controller.music_device.setCurrentIndex(1)
     controller.music_gpu_index.setValue(2)
+    controller.music_threads.setValue(8)
     requests, launches = [], []
     start = controller.classification_process.start
     write = controller.classification_process.write
@@ -70,6 +80,7 @@ def test_gpu_requests_and_precision_cache(controller, preview_source, monkeypatc
     assert launches[0][1] == ["-m", "fastvideoassembly.music_runtime", "classify"]
     assert requests[0]["device"] == "cuda"
     assert requests[0]["gpu_index"] == 2
+    assert requests[0]["threads"] == 1
     assert requests[0]["cache_dir"] == str(music_runtime.model_cache_path())
     controller.classify_music()
     assert len(launches) == 1
@@ -77,13 +88,16 @@ def test_gpu_requests_and_precision_cache(controller, preview_source, monkeypatc
     controller.apply_music_threshold_button.click()
     assert not controller.audio_muted
     controller.music_precision.setCurrentIndex(1)
+    controller.music_gpu_threads.setValue(2)
     controller.classify_music()
     qtbot.waitUntil(lambda: not controller.running)
     assert requests[-1]["precision"] == "float32"
+    assert requests[-1]["threads"] == 2
     controller.music_device.setCurrentIndex(0)
     controller.classify_music()
     qtbot.waitUntil(lambda: not controller.running)
     assert launches[-1][1] == ["-m", "fastvideoassembly.classification"]
+    assert requests[-1]["threads"] == 8
     assert len(controller.classification_cache) == 3
 
 
@@ -143,6 +157,64 @@ def test_install_failure_stops(monkeypatch):
         music_runtime.install_gpu_dependencies()
     assert raised.value is failure
     assert run.call_count == 1
+
+
+def test_missing_gpu_interpreter_reports_install_action(controller, preview_source, monkeypatch, qtbot):
+    clip = Clip(preview_source, 3, 60, 120, True)
+    controller.clips = [clip]
+    controller.refresh()
+    controller.select_clip(clip)
+    controller.music_device.setCurrentIndex(1)
+    start = controller.classification_process.start
+    error = ("error: uv trampoline failed to spawn Python child process\n"
+             "  Caused by: entity not found (os error 2)\n")
+
+    def launch(program, args):
+        start(sys.executable, ["-c", (
+            "import sys,json; json.load(sys.stdin); "
+            f"sys.stderr.write({error!r}); sys.exit(1)"
+        )])
+
+    monkeypatch.setattr(controller.classification_process, "start", launch)
+    controller.classify_music()
+    qtbot.waitUntil(lambda: not controller.running)
+    message = "GPU runtime could not start. Click Install GPU Dependencies in Music Classification."
+    assert error.strip() in controller.log.toPlainText()
+    assert message in controller.log.toPlainText()
+    assert controller.window.statusBar().currentMessage() == message
+    assert controller.progress.format() == "Music Classification failed - %v / %m"
+    assert not controller.classification_timer.isActive()
+    assert controller.music_panel.isEnabled()
+    assert controller.install_music_dependencies.isEnabled()
+    assert not controller.classification_cache
+    assert not controller.audio_muted
+
+    monkeypatch.setattr(controller.classification_process, "start", lambda program, args: start(
+        sys.executable, ["-c", (
+            "import sys,json; r=json.load(sys.stdin); "
+            "[print(json.dumps(dict(key=c['key'],path=c['path'],score=dict(music=0.8,talking=0.1))),flush=True) for c in r['clips']]"
+        )]))
+    controller.classify_music()
+    qtbot.waitUntil(lambda: not controller.running)
+    assert controller.classification_error == ""
+    assert controller.window.statusBar().currentMessage() == "Music Classification complete"
+
+
+@pytest.mark.parametrize("device, error", [
+    ("cuda", "RuntimeError: CUDA out of memory"),
+    ("cpu", "uv trampoline failed to spawn Python child process\nentity not found (os error 2)"),
+])
+def test_other_classification_failures_propagate(controller, device, error):
+    controller.music_device.setCurrentIndex(controller.music_device.findData(device))
+    controller.classification_buffer = ""
+    controller.classification_error = error
+    controller.classification_started = 0
+    controller.classification_scanned = 0
+    controller.classification_completed = 0
+    controller.stop_requested = False
+    with pytest.raises(subprocess.CalledProcessError):
+        controller.classification_finished(1, controller.classification_process.exitStatus())
+    assert "Click Install GPU Dependencies" not in controller.log.toPlainText()
 
 
 @pytest.mark.parametrize("device, model, weights", [

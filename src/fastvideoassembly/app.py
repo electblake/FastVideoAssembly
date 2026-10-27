@@ -164,9 +164,7 @@ class Application(QObject):
         self.classifying_music = False
         self.classification_process = QProcess(self)
         self.classification_process.readyReadStandardOutput.connect(self.read_classification)
-        self.classification_process.readyReadStandardError.connect(
-            lambda: self.log.appendPlainText(bytes(self.classification_process.readAllStandardError()).decode())
-        )
+        self.classification_process.readyReadStandardError.connect(self.read_classification)
         self.classification_process.finished.connect(self.classification_finished)
         self.classification_timer = QTimer(self.window)
         self.classification_timer.setInterval(1000)
@@ -398,7 +396,6 @@ class Application(QObject):
             lambda: self.settings.setValue("music/gpu_precision", self.music_precision.currentData())
         )
         self.music_gpu_index.valueChanged.connect(lambda value: self.settings.setValue("music/gpu_index", value))
-        self.music_device_changed()
         self.music_label = QLineEdit(self.settings.value("music/label", "music"))
         form.addRow("Music:", self.music_label)
         self.music_threshold = QDoubleSpinBox()
@@ -415,8 +412,14 @@ class Application(QObject):
         self.music_threads = QSpinBox()
         self.music_threads.setRange(1, 2147483647)
         self.music_threads.setValue(self.settings.value("music/threads", 1, type=int))
-        self.music_threads.setAccessibleName("Music classification threads")
-        form.addRow("Threads:", self.music_threads)
+        self.music_threads.setAccessibleName("CPU classification threads")
+        form.addRow("CPU threads:", self.music_threads)
+        self.music_gpu_threads = QSpinBox()
+        self.music_gpu_threads.setRange(1, 2147483647)
+        self.music_gpu_threads.setValue(self.settings.value("music/gpu_threads", 1, type=int))
+        self.music_gpu_threads.setAccessibleName("CUDA classification threads")
+        form.addRow("CUDA threads:", self.music_gpu_threads)
+        self.music_device_changed()
         self.mute_music = QCheckBox("Mute music clips")
         self.mute_music.setChecked(self.settings.value("music/mute", True, type=bool))
         form.addRow(self.mute_music)
@@ -442,6 +445,7 @@ class Application(QObject):
         self.music_label.textChanged.connect(lambda value: self.settings.setValue("music/label", value))
         self.music_threshold.valueChanged.connect(lambda value: self.settings.setValue("music/threshold", value))
         self.music_threads.valueChanged.connect(lambda value: self.settings.setValue("music/threads", value))
+        self.music_gpu_threads.valueChanged.connect(lambda value: self.settings.setValue("music/gpu_threads", value))
         self.mute_music.toggled.connect(lambda value: self.settings.setValue("music/mute", value))
         self.music_dock = QDockWidget("Music Classification", self.window)
         self.music_dock.setObjectName("musicClassification")
@@ -467,6 +471,8 @@ class Application(QObject):
         self.music_precision.blockSignals(False)
         self.music_precision.setEnabled(gpu)
         self.music_gpu_index.setEnabled(gpu)
+        self.music_threads.setEnabled(not gpu)
+        self.music_gpu_threads.setEnabled(gpu)
         self.install_music_dependencies.setEnabled(gpu)
 
     def open_model_cache(self):
@@ -530,6 +536,7 @@ class Application(QObject):
                  else [clip for clip in self.clips if clip in self.selected_clips])
         clips = [clip for clip in clips if isinstance(clip, Clip) and clip.has_audio]
         self.classification_buffer = ""
+        self.classification_error = ""
         self.classification_completed = 0
         self.classification_scanned = 0
         self.progress.setRange(0, len(clips))
@@ -567,7 +574,8 @@ class Application(QObject):
                      else ["-m", "fastvideoassembly.classification"])
         self.classification_process.start(sys.executable, arguments)
         self.classification_process.write(json.dumps({"ffmpeg": self.ffmpeg,
-            "labels": {"music": self.music_label.text(), "talking": self.talking_label.text()}, "threads": self.music_threads.value(), "clips": pending,
+            "labels": {"music": self.music_label.text(), "talking": self.talking_label.text()},
+            "threads": self.music_gpu_threads.value() if self.music_device.currentData() == "cuda" else self.music_threads.value(), "clips": pending,
             "device": self.music_device.currentData(), "precision": self.music_precision.currentData(),
             "gpu_index": self.music_gpu_index.value(), "cache_dir": str(model_cache_path())}).encode())
         self.classification_process.closeWriteChannel()
@@ -590,6 +598,10 @@ class Application(QObject):
         self.progress.setFormat(f"Music Classification - %v / %m - {rate:.1f} it/s - ETA {eta}")
 
     def read_classification(self):
+        error = bytes(self.classification_process.readAllStandardError()).decode()
+        if error:
+            self.classification_error += error
+            self.log.appendPlainText(error)
         self.classification_buffer += bytes(self.classification_process.readAllStandardOutput()).decode()
         while "\n" in self.classification_buffer:
             line, self.classification_buffer = self.classification_buffer.split("\n", 1)
@@ -611,6 +623,13 @@ class Application(QObject):
         if self.stop_requested:
             self.progress.setFormat("Music Classification stopped - %v / %m")
             self.window.statusBar().showMessage("Music Classification stopped")
+        elif (exit_code != 0 and self.music_device.currentData() == "cuda"
+              and "uv trampoline failed to spawn Python child process" in self.classification_error
+              and "entity not found (os error 2)" in self.classification_error):
+            message = "GPU runtime could not start. Click Install GPU Dependencies in Music Classification."
+            self.log.appendPlainText(message)
+            self.progress.setFormat("Music Classification failed - %v / %m")
+            self.window.statusBar().showMessage(message)
         else:
             subprocess.CompletedProcess([self.classification_process.program(),
                 *self.classification_process.arguments()], exit_code).check_returncode()
