@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-10-27
+
 ### Changed
 
 - Replaced custom FFmpeg and FFprobe process handling with `python-ffmpeg`, using asynchronous execution and package progress events for UI jobs.
