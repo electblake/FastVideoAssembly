@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.8.8] - 2026-10-27
+
+### Fixed
+
+- Limited BLAS and OpenMP to one thread per classification worker before numerical libraries load, preventing nested thread pools from multiplying memory use.
+
 ## [0.8.7] - 2026-10-27
 
 ### Fixed

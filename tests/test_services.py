@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import Future
@@ -166,6 +167,8 @@ def test_classification_routing_cache_and_failures(
 
 
 def test_worker_threads_own_and_reuse_classifiers(monkeypatch, capsys, preview_source):
+    for variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        monkeypatch.setenv(variable, "32")
     samples = []
 
     def score(audio, candidate_labels):
@@ -194,6 +197,8 @@ def test_worker_threads_own_and_reuse_classifiers(monkeypatch, capsys, preview_s
     }
 
     def create(device, precision, gpu_index, cache_dir):
+        assert all(os.environ[variable] == "1" for variable in (
+            "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"))
         assert (device, precision, gpu_index, cache_dir) == (
             "cpu",
             "float16",

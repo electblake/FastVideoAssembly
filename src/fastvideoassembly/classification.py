@@ -2,6 +2,7 @@
 
 import gc
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -107,6 +108,9 @@ def classify_clip(classifier, ffmpeg, path, duration, labels):
 
 
 def main():
+    # Clip workers provide concurrency; nested BLAS/OpenMP pools multiply memory use.
+    for variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[variable] = "1"
     request = json.load(sys.stdin)
     worker = local()
     initialization_lock = Lock()
