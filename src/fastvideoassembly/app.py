@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QObject,
     QProcess,
+    QProcessEnvironment,
     QSettings,
     Qt,
     QTimer,
@@ -166,6 +167,10 @@ class Application(QObject):
         self.classification_process.readyReadStandardOutput.connect(self.read_classification)
         self.classification_process.readyReadStandardError.connect(self.read_classification)
         self.classification_process.finished.connect(self.classification_finished)
+        self.classification_process.started.connect(
+            lambda: self.stop_export() if self.stop_requested else None)
+        self.classification_prepare_timer = QTimer(self.window)
+        self.classification_prepare_timer.timeout.connect(self.prepare_classification)
         self.classification_timer = QTimer(self.window)
         self.classification_timer.setInterval(1000)
         self.classification_timer.timeout.connect(self.update_classification_progress)
@@ -328,6 +333,7 @@ class Application(QObject):
         self.build_audio_settings(view_menu)
         self.build_output_settings(view_menu)
         self.build_music_settings(view_menu)
+        self.build_models_settings(view_menu)
 
         self.assembler_tabs = QTabWidget()
         self.assembler = ThreeColumnAssembly(self)
@@ -359,6 +365,22 @@ class Application(QObject):
         self.preview.activity.connect(self.window.statusBar().showMessage)
         self.preview.activity.connect(self.log_dock.show)
         view_menu.addAction(self.log_dock.toggleViewAction())
+
+    def build_models_settings(self, view_menu):
+        self.models_panel = QWidget()
+        form = QFormLayout(self.models_panel)
+        self.huggingface_token = QLineEdit(self.settings.value("models/huggingface_token", ""))
+        self.huggingface_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.huggingface_token.setAccessibleName("Hugging Face token")
+        self.huggingface_token.textChanged.connect(
+            lambda value: self.settings.setValue("models/huggingface_token", value)
+        )
+        form.addRow("Hugging Face token:", self.huggingface_token)
+        self.models_dock = QDockWidget("Models", self.window)
+        self.models_dock.setObjectName("models")
+        self.models_dock.setWidget(self.models_panel)
+        self.window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.models_dock)
+        view_menu.addAction(self.models_dock.toggleViewAction())
 
     def build_music_settings(self, view_menu):
         self.music_panel = QWidget()
@@ -447,7 +469,7 @@ class Application(QObject):
         self.music_threads.valueChanged.connect(lambda value: self.settings.setValue("music/threads", value))
         self.music_gpu_threads.valueChanged.connect(lambda value: self.settings.setValue("music/gpu_threads", value))
         self.mute_music.toggled.connect(lambda value: self.settings.setValue("music/mute", value))
-        self.music_dock = QDockWidget("Music Classification", self.window)
+        self.music_dock = QDockWidget("Audio Classification", self.window)
         self.music_dock.setObjectName("musicClassification")
         music_scroll = QScrollArea()
         music_scroll.setWidgetResizable(True)
@@ -493,6 +515,10 @@ class Application(QObject):
         arguments = ["-m", "fastvideoassembly.music_runtime", operation]
         if operation == "download":
             arguments.append(self.music_device.currentData())
+        environment = QProcessEnvironment.systemEnvironment()
+        if self.huggingface_token.text():
+            environment.insert("HF_TOKEN", self.huggingface_token.text())
+        self.music_setup_process.setProcessEnvironment(environment)
         self.music_setup_process.start(sys.executable, arguments)
 
     def read_music_setup(self):
@@ -541,10 +567,22 @@ class Application(QObject):
         self.classification_scanned = 0
         self.progress.setRange(0, len(clips))
         self.progress.setValue(0)
-        self.progress.setFormat("Music Classification - %v / %m - 0.0 it/s - ETA --:--:--")
+        self.progress.setFormat("Audio Classification - %v / %m - 0.0 it/s - ETA --:--:--")
         self.log_dock.show()
-        pending = []
-        for clip in clips:
+        self.classification_clips = list(reversed(clips))
+        self.classification_pending = []
+        self.classification_started = monotonic()
+        self.classifying_music = True
+        self.stop_requested = False
+        self.running = True
+        self.classification_timer.start()
+        self.update_enabled()
+        self.window.statusBar().showMessage("Audio Classification")
+        self.classification_prepare_timer.start(0)
+
+    def prepare_classification(self):
+        if self.classification_clips:
+            clip = self.classification_clips.pop()
             key = json.dumps(["music-v2", MODEL_ID, MODEL_FILE, WINDOW_SECONDS,
                               {"music": self.music_label.text(), "talking": self.talking_label.text()}, BACKGROUND_LABELS, self.source_audio_key(clip)])
             if self.music_device.currentData() == "cuda":
@@ -554,28 +592,25 @@ class Application(QObject):
             if key in self.classification_cache:
                 self.apply_music_score(str(clip.path), self.classification_cache[key])
             else:
-                pending.append({"key": key, "path": str(clip.path), "duration": clip.duration})
-        self.classification_started = monotonic()
-        self.update_classification_progress()
-        if not pending:
-            self.save_active_state()
-            self.update_preview_audio()
-            self.update_enabled()
-            self.window.statusBar().showMessage("Music Classification complete")
+                self.classification_pending.append({"key": key, "path": str(clip.path), "duration": clip.duration})
             return
-        self.classifying_music = True
-        self.stop_requested = False
-        self.running = True
-        self.classification_timer.start()
-        self.update_enabled()
-        self.window.statusBar().showMessage("Classifying music")
+        self.classification_prepare_timer.stop()
+        self.update_classification_progress()
+        if not self.classification_pending:
+            self.save_active_state()
+            self.classification_finished(0, QProcess.ExitStatus.NormalExit)
+            return
         arguments = (["-m", "fastvideoassembly.music_runtime", "classify"]
                      if self.music_device.currentData() == "cuda"
                      else ["-m", "fastvideoassembly.classification"])
+        environment = QProcessEnvironment.systemEnvironment()
+        if self.huggingface_token.text():
+            environment.insert("HF_TOKEN", self.huggingface_token.text())
+        self.classification_process.setProcessEnvironment(environment)
         self.classification_process.start(sys.executable, arguments)
         self.classification_process.write(json.dumps({"ffmpeg": self.ffmpeg,
             "labels": {"music": self.music_label.text(), "talking": self.talking_label.text()},
-            "threads": self.music_gpu_threads.value() if self.music_device.currentData() == "cuda" else self.music_threads.value(), "clips": pending,
+            "threads": self.music_gpu_threads.value() if self.music_device.currentData() == "cuda" else self.music_threads.value(), "clips": self.classification_pending,
             "device": self.music_device.currentData(), "precision": self.music_precision.currentData(),
             "gpu_index": self.music_gpu_index.value(), "cache_dir": str(model_cache_path())}).encode())
         self.classification_process.closeWriteChannel()
@@ -595,7 +630,7 @@ class Application(QObject):
         rate = self.classification_scanned / elapsed if self.classification_scanned else 0.0
         remaining = self.progress.maximum() - self.classification_completed
         eta = (timestamp(remaining / rate) if self.classification_scanned else "--:--:--") if remaining else "00:00:00"
-        self.progress.setFormat(f"Music Classification - %v / %m - {rate:.1f} it/s - ETA {eta}")
+        self.progress.setFormat(f"Audio Classification - %v / %m - {rate:.1f} it/s - ETA {eta}")
 
     def read_classification(self):
         error = bytes(self.classification_process.readAllStandardError()).decode()
@@ -621,19 +656,19 @@ class Application(QObject):
         self.update_enabled()
         self.update_preview_audio()
         if self.stop_requested:
-            self.progress.setFormat("Music Classification stopped - %v / %m")
-            self.window.statusBar().showMessage("Music Classification stopped")
+            self.progress.setFormat("Audio Classification stopped - %v / %m")
+            self.window.statusBar().showMessage("Audio Classification stopped")
         elif (exit_code != 0 and self.music_device.currentData() == "cuda"
               and "uv trampoline failed to spawn Python child process" in self.classification_error
               and "entity not found (os error 2)" in self.classification_error):
-            message = "GPU runtime could not start. Click Install GPU Dependencies in Music Classification."
+            message = "GPU runtime could not start. Click Install GPU Dependencies in Audio Classification."
             self.log.appendPlainText(message)
-            self.progress.setFormat("Music Classification failed - %v / %m")
+            self.progress.setFormat("Audio Classification failed - %v / %m")
             self.window.statusBar().showMessage(message)
         else:
             subprocess.CompletedProcess([self.classification_process.program(),
                 *self.classification_process.arguments()], exit_code).check_returncode()
-            self.window.statusBar().showMessage("Music Classification complete")
+            self.window.statusBar().showMessage("Audio Classification complete")
 
     def copy_log(self):
         self.log.selectAll()
@@ -1505,10 +1540,11 @@ class Application(QObject):
         self.assembler.longest_button.setEnabled(idle and scanned)
         self.assembler.shuffle_button.setEnabled(idle and scanned)
         self.music_panel.setEnabled(idle)
-        self.assembler.classify_clips_button.setEnabled(idle and any(
-            isinstance(clip, Clip) and clip.has_audio for clip in self.selected_clips))
+        self.models_panel.setEnabled(idle)
         self.assembler.classify_timelines_button.setEnabled(idle and any(
             clip.has_audio for index in self.target_timelines for clip in self.assembler.tracks[index]))
+        self.assembler.classification_stop_button.setEnabled(
+            self.running and self.classifying_music and self.classification_timer.isActive())
         self.assembler.create_button.setEnabled(idle and bool(self.clips))
         self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
@@ -1906,6 +1942,13 @@ class Application(QObject):
         self.log.appendPlainText("Stop requested. Waiting for active work to exit")
         self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")
         if self.classifying_music:
+            if self.classification_prepare_timer.isActive():
+                self.classification_prepare_timer.stop()
+                self.save_active_state()
+                self.classification_finished(0, QProcess.ExitStatus.NormalExit)
+                return
+            if self.classification_process.state() == QProcess.ProcessState.Starting:
+                return
             subprocess.run(["taskkill", "/PID", str(self.classification_process.processId()), "/T", "/F"],
                            check=True, creationflags=subprocess.CREATE_NO_WINDOW)
         elif self.render_waiting:

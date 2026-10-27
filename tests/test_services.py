@@ -57,6 +57,7 @@ def test_classification_routing_cache_and_failures(
         assert requests[0]["threads"] == 1
         assert requests[0]["cache_dir"] == str(music_runtime.model_cache_path())
         controller.classify_music()
+        qtbot.waitUntil(lambda: not controller.running)
         assert len(launches) == 1
         controller.music_threshold.setValue(0.9)
         controller.apply_music_threshold_button.click()
@@ -103,11 +104,11 @@ def test_classification_routing_cache_and_failures(
         patch.setattr(controller.classification_process, "start", launch)
         controller.classify_music()
         qtbot.waitUntil(lambda: not controller.running)
-        message = "GPU runtime could not start. Click Install GPU Dependencies in Music Classification."
+        message = "GPU runtime could not start. Click Install GPU Dependencies in Audio Classification."
         assert error.strip() in controller.log.toPlainText()
         assert message in controller.log.toPlainText()
         assert controller.window.statusBar().currentMessage() == message
-        assert controller.progress.format() == "Music Classification failed - %v / %m"
+        assert controller.progress.format() == "Audio Classification failed - %v / %m"
         assert not controller.classification_timer.isActive()
         assert controller.music_panel.isEnabled()
         assert controller.install_music_dependencies.isEnabled()
@@ -133,7 +134,7 @@ def test_classification_routing_cache_and_failures(
         assert controller.classification_error == ""
         assert (
             controller.window.statusBar().currentMessage()
-            == "Music Classification complete"
+            == "Audio Classification complete"
         )
 
     for device, error in [

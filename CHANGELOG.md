@@ -2,11 +2,25 @@
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-10-26
+
+### Added
+
+- Added a dockable Models panel with a masked Hugging Face token field saved in QSettings and passed to model download and classification workers.
+- Added Stop beside Audio Classification to interrupt classification while preserving completed results.
+
 ### Changed
 
+- Renamed Music Classification to Audio Classification, including its action and status messages.
+- Placed the Timelines and Clips control groups side by side below the timeline display and removed the classification button from Clips.
 - Added agent guidance for focused suite execution, shared test resources, and avoiding low-value test growth; required retiring temporary fix-specific tests after their fixes ship.
 - Reduced regression coverage from 445 cases to 18 critical workflows across application, media, and service suites, sharing application instances within workflows and generating preview media once per session.
 - Documented the compact suite structure and representative render coverage to limit repeated window and process launches.
+
+### Fixed
+
+- Enabled classification cancellation immediately and processed preparation incrementally so the UI remains responsive before model inference starts.
+- Handled Stop during worker startup without attempting to terminate an unstarted process.
 
 ## [0.8.4] - 2026-10-26
 

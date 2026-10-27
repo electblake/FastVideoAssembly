@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QPushButton,
     QSpinBox,
@@ -87,6 +88,8 @@ class ThreeColumnAssembly(QWidget):
         self.timeline.hideButtons()
         self.timeline.scene().sigMouseClicked.connect(controller.timeline_clicked)
         layout.addWidget(self.timeline, 1)
+        selection_groups = QHBoxLayout()
+        layout.addLayout(selection_groups)
         self.timelines_group = QGroupBox("Timelines (All)")
         timelines_layout = QVBoxLayout(self.timelines_group)
         ordering_buttons = QGridLayout()
@@ -105,9 +108,13 @@ class ThreeColumnAssembly(QWidget):
         self.select_no_timelines_button = QPushButton("Select None")
         self.select_no_timelines_button.clicked.connect(controller.clear_timeline_selection)
         ordering_buttons.addWidget(self.select_no_timelines_button, 1, 1)
-        self.classify_timelines_button = QPushButton("Classify Music")
+        self.classify_timelines_button = QPushButton("Audio Classification")
         self.classify_timelines_button.clicked.connect(lambda: controller.classify_music(timelines=True))
-        ordering_buttons.addWidget(self.classify_timelines_button, 2, 0, 1, 2)
+        ordering_buttons.addWidget(self.classify_timelines_button, 2, 0)
+        self.classification_stop_button = QPushButton("Stop")
+        self.classification_stop_button.setAccessibleName("Stop audio classification")
+        self.classification_stop_button.clicked.connect(controller.stop_export)
+        ordering_buttons.addWidget(self.classification_stop_button, 2, 1)
         self.sticky_timeline_selections = QCheckBox("Sticky timeline selections")
         self.sticky_timeline_selections.setChecked(
             controller.settings.value("assembly/stickyTimelineSelections", True, type=bool)
@@ -117,7 +124,7 @@ class ThreeColumnAssembly(QWidget):
         )
         self.sticky_timeline_selections.toggled.connect(controller.set_sticky_timeline_selections)
         timelines_layout.addWidget(self.sticky_timeline_selections)
-        layout.addWidget(self.timelines_group)
+        selection_groups.addWidget(self.timelines_group)
         self.clips_group = QGroupBox("Clips (0)")
         clips_layout = QVBoxLayout(self.clips_group)
         clip_buttons = QGridLayout()
@@ -145,9 +152,6 @@ class ThreeColumnAssembly(QWidget):
             clip_buttons.addWidget(button, 0, index)
         clip_buttons.addWidget(self.select_none_button, 1, 0, 1, 2)
         clip_buttons.addWidget(self.remove_button, 1, 2, 1, 2)
-        self.classify_clips_button = QPushButton("Classify Music")
-        self.classify_clips_button.clicked.connect(lambda: controller.classify_music(timelines=False))
-        clip_buttons.addWidget(self.classify_clips_button, 2, 0, 1, 4)
         self.sticky_clip_selections = QCheckBox("Sticky clip selections")
         self.sticky_clip_selections.setChecked(
             controller.settings.value("assembly/stickyClipSelections", True, type=bool)
@@ -157,7 +161,7 @@ class ThreeColumnAssembly(QWidget):
         )
         self.sticky_clip_selections.toggled.connect(controller.set_sticky_clip_selections)
         clips_layout.addWidget(self.sticky_clip_selections)
-        layout.addWidget(self.clips_group)
+        selection_groups.addWidget(self.clips_group)
         final_row = QGridLayout()
         final_row.addWidget(controller.combine, 0, 0)
         final_row.addWidget(QLabel("Columns"), 0, 1)
