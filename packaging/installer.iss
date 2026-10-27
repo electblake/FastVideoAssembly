@@ -26,10 +26,14 @@ LicenseFile=..\LICENSE
 InfoBeforeFile=online-install.txt
 SetupLogging=yes
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\application\src\fastvideoassembly"
+
 [Files]
 Source: "..\LICENSE"; DestDir: "{app}\application"; Flags: ignoreversion
 Source: "..\pyproject.toml"; DestDir: "{app}\application"; Flags: ignoreversion
 Source: "..\uv.lock"; DestDir: "{app}\application"; Flags: ignoreversion
+Source: "..\build\gpu-media-requirements.txt"; DestDir: "{app}\application"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}\application"; Flags: ignoreversion
 Source: "..\CHANGELOG.md"; DestDir: "{app}\application"; Flags: ignoreversion
 Source: "..\src\fastvideoassembly\*.py"; DestDir: "{app}\application\src\fastvideoassembly"; Flags: ignoreversion
@@ -57,6 +61,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\application\.venv\Scripts\p
 
 [Run]
 Filename: "{app}\tools\uv\uv.exe"; Parameters: "sync --project ""{app}\application"" --python ""{app}\runtime\python\python.exe"" --no-python-downloads --locked --no-dev --no-editable --no-config --no-cache"; StatusMsg: "Installing locked Python dependencies..."; Flags: runhidden logoutput
+Filename: "{app}\tools\uv\uv.exe"; Parameters: "pip install --python ""{localappdata}\FastVideoAssembly\runtimes\music-cu130\Scripts\python.exe"" --requirements ""{app}\application\gpu-media-requirements.txt"" --no-config"; StatusMsg: "Updating GPU media dependencies..."; Flags: runhidden logoutput; Check: FileExists(ExpandConstant('{localappdata}\FastVideoAssembly\runtimes\music-cu130\Scripts\python.exe'))
 ; postinstall is checked by default; omit unchecked to launch on Finish.
 Filename: "{app}\application\.venv\Scripts\pythonw.exe"; Parameters: "-I -m fastvideoassembly.installed"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
 

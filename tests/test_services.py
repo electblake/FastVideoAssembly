@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 import requests
+from ffmpeg import FFmpegError
 from PySide6.QtWidgets import QMainWindow
 
 from fastvideoassembly import classification, hardware, music_runtime, updates
@@ -164,7 +165,18 @@ def test_classification_routing_cache_and_failures(
         )
 
 
-def test_worker_threads_own_and_reuse_classifiers(monkeypatch, capsys):
+def test_worker_threads_own_and_reuse_classifiers(monkeypatch, capsys, preview_source):
+    samples = []
+
+    def score(audio, candidate_labels):
+        samples.append(len(audio))
+        return [{"label": label, "score": 0.8} for label in candidate_labels]
+
+    assert classification.classify_clip(
+        score, "ffmpeg", str(preview_source), 0.2, {"music": "music"},
+    ) == {"music": 0.8}
+    assert samples == [9600]
+
     threads = 2
     barrier = Barrier(threads)
     classifiers = []
@@ -216,6 +228,70 @@ def test_worker_threads_own_and_reuse_classifiers(monkeypatch, capsys):
     ]
 
 
+# Retire after: first release containing the memory retry and native log fixes.
+def test_classification_memory_retries(monkeypatch, capsys):
+    request = {"threads": 1, "ffmpeg": "ffmpeg", "device": "cpu", "precision": "float16",
+               "gpu_index": 0, "cache_dir": "models", "labels": {"music": "music"},
+               "clips": [{"key": "clip", "path": "clip.mp4", "duration": 1}]}
+    result = {"music": 0.8}
+    for failure in (MemoryError("allocation failed"), RuntimeError("Failed to allocate memory"),
+                    OSError(12, "Cannot allocate memory"),
+                    FFmpegError("Cannot allocate memory", ["ffmpeg"])):
+        for exhausted in (False, True):
+            create = Mock(return_value=object())
+            classify = Mock(side_effect=[failure] * 3 + [failure if exhausted else result])
+            delay = Mock()
+            monkeypatch.setattr(classification, "create_classifier", create)
+            monkeypatch.setattr(classification, "classify_clip", classify)
+            monkeypatch.setattr(classification, "sleep", delay)
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+            if exhausted:
+                with pytest.raises(type(failure)) as raised:
+                    classification.main()
+                assert raised.value is failure
+            else:
+                classification.main()
+            output = capsys.readouterr()
+            assert output.err.count("Retry ") == 3
+            assert delay.call_count == 3
+            assert all(call.args == (5,) for call in delay.call_args_list)
+            assert classify.call_count == 4
+            assert create.call_count == 1
+            assert len(output.out.splitlines()) == (0 if exhausted else 1)
+    create = Mock(side_effect=[MemoryError(), object()])
+    monkeypatch.setattr(classification, "create_classifier", create)
+    monkeypatch.setattr(classification, "classify_clip", Mock(return_value=result))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    classification.main()
+    assert create.call_count == 2
+    capsys.readouterr()
+    delay.reset_mock()
+    error = ValueError("invalid input")
+    monkeypatch.setattr(classification, "create_classifier", Mock(side_effect=error))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(request)))
+    with pytest.raises(ValueError) as raised:
+        classification.main()
+    assert raised.value is error
+    delay.assert_not_called()
+
+
+# Retire after: first release containing the memory retry and native log fixes.
+def test_native_classification_log_decoding(controller, monkeypatch):
+    message = "[W:onnxruntime] Could not constant fold Exp node"
+    native = ("\x1b[0;93m" + message + "\x1b[m\n").encode("utf-16-le")
+    native = native.replace(b"\n\x00", b"\r\n\x00")
+    python = "Memory error: café\n".encode()
+    controller.classification_error = ""
+    for byte in native + python:
+        monkeypatch.setattr(controller.classification_process, "readAllStandardError", lambda b=byte: bytes([b]))
+        controller.read_classification_error()
+    monkeypatch.setattr(controller.classification_process, "readAllStandardError", lambda: b"final error")
+    controller.read_classification_error(final=True)
+    assert controller.classification_error == message + "\nMemory error: café\nfinal error\n"
+    assert "\x00" not in controller.log.toPlainText()
+    assert "\x1b" not in controller.log.toPlainText()
+
+
 def test_gpu_install_commands_and_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(music_runtime, "gpu_runtime_path", lambda: tmp_path / "gpu")
     run = Mock()
@@ -242,11 +318,12 @@ def test_hardware_capability_selection(monkeypatch):
     run = Mock(
         side_effect=[
             SimpleNamespace(stdout=json.dumps(["NVIDIA", "Intel Corporation"])),
-            SimpleNamespace(stdout="cuda qsv d3d11va dxva2"),
-            SimpleNamespace(stdout="scale_cuda scale_qsv vpp_qsv"),
         ]
     )
     monkeypatch.setattr(hardware.subprocess, "run", run)
+    monkeypatch.setattr(hardware.FFmpeg, "execute", Mock(side_effect=[
+        b"cuda qsv d3d11va dxva2", b"scale_cuda scale_qsv vpp_qsv",
+    ]))
     decoders, scalers = hardware.render_hardware("test-supported-ffmpeg")
     assert [value for _, value in decoders] == [
         "none",
@@ -260,11 +337,12 @@ def test_hardware_capability_selection(monkeypatch):
     run = Mock(
         side_effect=[
             SimpleNamespace(stdout=json.dumps(["Intel Corporation"])),
-            SimpleNamespace(stdout="cuda qsv d3d11va dxva2"),
-            SimpleNamespace(stdout="scale_cuda vpp_qsv"),
         ]
     )
     monkeypatch.setattr(hardware.subprocess, "run", run)
+    monkeypatch.setattr(hardware.FFmpeg, "execute", Mock(side_effect=[
+        b"cuda qsv d3d11va dxva2", b"scale_cuda vpp_qsv",
+    ]))
     decoders, scalers = hardware.render_hardware("test-limited-ffmpeg")
     assert [value for _, value in decoders] == ["none", "qsv", "d3d11va", "dxva2"]
     assert scalers == [("CPU", "cpu")]

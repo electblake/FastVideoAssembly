@@ -220,9 +220,6 @@ class RenderConfig:
             encoder_format,
             "-movflags",
             "+faststart",
-            "-progress",
-            "pipe:1",
-            "-nostats",
         ]
 
 
@@ -401,7 +398,7 @@ def division_arguments(tracks, duration, output, graph_path, config, peaks, peak
     Path(graph_path).write_text(";\n".join(filters), encoding="utf-8")
     args += ["-/filter_complex", str(graph_path)]
     if measure:
-        return args + ["-map", "[audio]", "-vn", "-progress", "pipe:1", "-nostats", "-f", "null", "-"]
+        return args + ["-map", "[audio]", "-vn", "-f", "null", "-"]
     if audio_only:
         return args
     return (args + ["-map", "[output]", "-t", str(duration)]
@@ -503,5 +500,5 @@ def join_division_arguments(segments, tracks, duration, output, manifest, config
         + (["-map", "[audio]", "-c:a", config.audio_codec, "-b:a", "192k", "-ar", "48000", "-ac", "2"]
            if config.audio_codec != "none" else ["-an"])
         + (["-tag:v", "hvc1"] if config.encoder == "hevc_nvenc" else [])
-        + ["-t", str(duration), "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+        + ["-t", str(duration), "-movflags", "+faststart", str(output)]
     )

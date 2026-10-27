@@ -30,9 +30,6 @@ def peak_measurement_arguments(clip):
             f"atrim=duration={clip.duration},"
             "loudnorm=I=-14:TP=-1:LRA=50:linear=false:print_format=json"
         ),
-        "-progress",
-        "pipe:1",
-        "-nostats",
         "-f",
         "null",
         "-",
@@ -56,9 +53,6 @@ def mix_peak_arguments(columns, duration):
         "-map",
         "[audio]",
         "-vn",
-        "-progress",
-        "pipe:1",
-        "-nostats",
         "-f",
         "null",
         "-",

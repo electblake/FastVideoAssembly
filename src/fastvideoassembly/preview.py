@@ -1,10 +1,9 @@
 """Dock content for previewing the selected source video."""
 
-import subprocess
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -19,6 +18,8 @@ from PySide6.QtWidgets import (
 )
 from shiboken6 import delete
 
+from .media_tasks import MediaCommand, MediaTask
+
 
 class Preview(QWidget):
     activity = Signal(str)
@@ -32,6 +33,7 @@ class Preview(QWidget):
         self.preparing_audio = False
         self.audio_directory = None
         self.audio_process = None
+        self.audio_tasks = set()
         self.clip = None
         self.audio_clip = None
         self.saved_gain = 0.0
@@ -144,8 +146,7 @@ class Preview(QWidget):
     def cancel_audio(self):
         self.audio_request += 1
         if self.audio_process is not None:
-            self.audio_process.kill()
-            self.audio_process.waitForFinished()
+            self.audio_process.stop()
             self.audio_process = None
 
     def edit_gain(self, value):
@@ -185,14 +186,8 @@ class Preview(QWidget):
         clip = self.clip
 
         directory = tempfile.TemporaryDirectory(prefix="fastvideoassembly-preview-")
-        process = QProcess(self)
-        self.audio_process = process
-        process.setProcessChannelMode(QProcess.ProcessChannelMode.ForwardedErrorChannel)
-        process.finished.connect(
-            lambda code, _: self.load_audio_preview(request, directory, process, code)
-        )
-        process.start(ffmpeg, [
-            "-v", "error", "-n", "-i", str(clip.path),
+        command = MediaCommand(ffmpeg, [
+            "-hide_banner", "-n", "-i", str(clip.path),
             "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy",
             "-af", ("aresample=48000:async=1:first_pts=0,"
                     "aformat=sample_fmts=fltp:channel_layouts=stereo,"
@@ -200,13 +195,26 @@ class Preview(QWidget):
             "-c:a", "pcm_f32le", str(Path(directory.name) / "preview.mkv"),
         ])
 
-    def load_audio_preview(self, request, directory, process, exit_code):
+        process = MediaTask(command, self)
+        self.audio_tasks.add(process)
+        self.audio_process = process
+        process.finished.connect(lambda: self.load_audio_preview(request, directory, process))
+        process.start()
+
+    def load_audio_preview(self, request, directory, process):
+        self.audio_tasks.remove(process)
         process.deleteLater()
         if request != self.audio_request:
+            directory.cleanup()
+            process.future.result()
             return
-        subprocess.CompletedProcess([process.program(), *process.arguments()], exit_code).check_returncode()
         self.audio_process = None
         self.preparing_audio = False
+        self.play_button.setEnabled(True)
+        self.scrubber.setEnabled(True)
+        if process.future.exception() is not None:
+            directory.cleanup()
+        process.future.result()
         self.set_source(QUrl.fromLocalFile(str(Path(directory.name) / "preview.mkv")))
         self.audio_directory = directory
         self.play_button.setEnabled(True)

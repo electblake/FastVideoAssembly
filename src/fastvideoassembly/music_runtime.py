@@ -28,7 +28,7 @@ def install_gpu_dependencies():
     subprocess.run([
         sys.executable, "-m", "uv", "pip", "install", "--python", str(python),
         "--torch-backend", "cu130", "torch>=2.14.1", "transformers>=5.20.2",
-        "huggingface-hub>=2.3.0", "numpy>=2.5.4",
+        "huggingface-hub>=2.3.0", "numpy>=2.5.4", "python-ffmpeg>=2.0.12",
     ], check=True, creationflags=subprocess.CREATE_NO_WINDOW)
     subprocess.run([str(python), "-c",
                     "import torch; torch.cuda.init(); print('CUDA ready:', torch.cuda.get_device_name(0))"],

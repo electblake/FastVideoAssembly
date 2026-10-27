@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced custom FFmpeg and FFprobe process handling with `python-ffmpeg`, using asynchronous execution and package progress events for UI jobs.
+- Moved Normalize Audio below Audio Classification in the Timelines group and added a dedicated Stop button.
+- Updated Setup to install hash-pinned media dependencies into existing GPU runtimes and replace the private source directory during upgrades to remove orphaned modules.
+- Surfaced FFprobe failures through library exceptions instead of silently removing failed sources.
+
+### Removed
+
+- Removed scanning and rendering Pause controls, their unused state and handlers, and obsolete FFmpeg progress parsing.
+
+### Fixed
+
+- Fixed render and normalization cancellation, waited for process completion before temporary-file cleanup, and restored controls so another render can start.
+- Canceled outstanding preview-audio jobs and cleaned their temporary files before closing the application.
+- Decoded native ONNX Runtime classification logs correctly, removed terminal escape sequences, and preserved failure details.
+- Retried classification memory-exhaustion failures with bounded delays while allowing other failures to surface.
+
 ## [0.8.5] - 2026-10-26
 
 ### Added

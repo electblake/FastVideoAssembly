@@ -4,6 +4,8 @@ import json
 import subprocess
 from functools import cache
 
+from ffmpeg import FFmpeg
+
 
 @cache
 def render_hardware(ffmpeg):
@@ -13,16 +15,8 @@ def render_hardware(ffmpeg):
         check=True, capture_output=True, text=True,
         creationflags=subprocess.CREATE_NO_WINDOW,
     ).stdout)
-    accelerators = subprocess.run(
-        [ffmpeg, "-hide_banner", "-hwaccels"],
-        check=True, capture_output=True, text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    ).stdout.split()
-    filters = subprocess.run(
-        [ffmpeg, "-hide_banner", "-filters"],
-        check=True, capture_output=True, text=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    ).stdout.split()
+    accelerators = FFmpeg(ffmpeg).option("hide_banner").option("hwaccels").execute().decode().split()
+    filters = FFmpeg(ffmpeg).option("hide_banner").option("filters").execute().decode().split()
     decoders = [("CPU", "none")]
     scalers = [("CPU", "cpu")]
     if "cuda" in accelerators and any("NVIDIA" in adapter.upper() for adapter in adapters):

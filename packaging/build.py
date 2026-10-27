@@ -13,6 +13,13 @@ args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 version = tomllib.loads((root / "pyproject.toml").read_text())["project"]["version"]
 (root / "build").mkdir(exist_ok=True)
+packages = {package["name"]: package for package in tomllib.loads((root / "uv.lock").read_text())["package"]}
+(root / "build/gpu-media-requirements.txt").write_text(
+    "--require-hashes\n" + "\n".join(
+        f"{name}=={packages[name]['version']} --hash={packages[name]['wheels'][0]['hash']}"
+        for name in ("python-ffmpeg", "pyee", "typing-extensions")
+    ) + "\n"
+)
 definitions = []
 for name, filename in (
     ("Uv", "uv.json"),

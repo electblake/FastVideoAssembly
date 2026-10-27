@@ -5,6 +5,8 @@
 - Outputs `dist/installer/FastVideoAssembly-<version>-windows-amd64-Setup.exe` and its SHA-256 file.
 - Setup downloads hash-verified private Python, uv, and FFmpeg versions pinned in `packaging/python.json`, `packaging/uv.json`, and `packaging/vendor.json`.
 - Installation requires internet access and creates per-user Start Menu and desktop shortcuts without changing PATH or system Python.
+- Setup installs `python-ffmpeg` and `pyee` from `uv.lock`. Upgrades replace the private source directory to remove obsolete modules; `uv sync` removes dependencies no longer in the lockfile.
+- Existing optional GPU runtimes receive the same hash-pinned `python-ffmpeg`, `pyee`, and `typing-extensions` versions. This step does not install a GPU runtime or change its Torch/model packages.
 - The application uses the independent `electblake.FastVideoAssembly` identity for installation and Explorer integration.
 - Source licenses and third-party notices ship with the installer. Builds are unsigned.
 - This project has no VM infrastructure or VM testing workflow. VM testing is not available and is not part of the release process. Do not introduce it as an optional check, prerequisite, pending task, or release limitation. Generic packaging-skill VM requirements do not apply.

@@ -24,6 +24,7 @@ Follow [the test execution and lifecycle policy](../AGENTS.md#test-execution-and
 
 ## Rendering
 
+- FFmpeg and FFprobe execution uses `python-ffmpeg`. UI jobs use its async API on a dedicated event loop, with Qt signals delivering progress and completion. Cancellation calls the package's termination API; temporary files are removed after execution finishes and the output streams close.
 - Portrait eligibility uses display aspect ratio, including rotation and sample aspect ratio.
 - Balancing assigns the longest remaining clip to the shortest timeline, then sorts each timeline shortest to longest.
 - Timeline blocks and exports use the same output-frame rounding.

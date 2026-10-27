@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from time import monotonic
 
 import pyqtgraph as pg
 import qt_themes
+from ffmpeg.asyncio import FFmpeg
 from platformdirs import user_config_path
 from PySide6.QtCore import (
     QEvent,
@@ -84,6 +86,7 @@ from .classification import (
     WINDOW_SECONDS,
 )
 from .hardware import render_hardware
+from .media_tasks import MediaCommand, MediaTask
 from .music_runtime import model_cache_path
 from .preview import Preview
 from .settings import NoProfileSettings
@@ -136,11 +139,8 @@ class Application(QObject):
         self.pending = []
         self.loading = False
         self.running = False
-        self.scanning_paused = False
         self.scan_stop_requested = False
-        self.render_paused = False
         self.stop_requested = False
-        self.render_waiting = False
         self.selected_clip = None
         self.export_directory = None
         self.window = QMainWindow()
@@ -148,14 +148,8 @@ class Application(QObject):
         self.window.resize(1280, 850)
         self.window.setAcceptDrops(True)
         self.window.installEventFilter(self)
-        self.probe = QProcess(self)
-        self.probe.finished.connect(partial(self.probed, self.probe))
-        self.probes = [self.probe]
         self.probing_paths = {}
-        self.process = QProcess(self)
-        self.process.readyReadStandardOutput.connect(self.read_progress)
-        self.process.readyReadStandardError.connect(self.read_log)
-        self.process.finished.connect(self.finished)
+        self.render_task = None
         self.normalizing_audio = False
         self.measurement_processes = {}
         self.normalization_cache = json.loads(self.settings.value("audio/measurements", "{}"))
@@ -163,6 +157,7 @@ class Application(QObject):
         self.audio_muted = set(json.loads(self.settings.value("audio/muted", "[]")))
         self.classification_cache = json.loads(self.settings.value("music/scores", "{}"))
         self.classifying_music = False
+        self.classification_error_bytes = b""
         self.classification_process = QProcess(self)
         self.classification_process.readyReadStandardOutput.connect(self.read_classification)
         self.classification_process.readyReadStandardError.connect(self.read_classification)
@@ -337,6 +332,7 @@ class Application(QObject):
 
         self.assembler_tabs = QTabWidget()
         self.assembler = ThreeColumnAssembly(self)
+        self.audio_settings_changed()
         self.assembler_tabs.addTab(self.assembler, "Column Assembly")
         self.window.setCentralWidget(self.assembler_tabs)
         process_panel = QWidget()
@@ -516,6 +512,8 @@ class Application(QObject):
         if operation == "download":
             arguments.append(self.music_device.currentData())
         environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        environment.insert("PYTHONIOENCODING", "utf-8")
         if self.huggingface_token.text():
             environment.insert("HF_TOKEN", self.huggingface_token.text())
         self.music_setup_process.setProcessEnvironment(environment)
@@ -563,6 +561,7 @@ class Application(QObject):
         clips = [clip for clip in clips if isinstance(clip, Clip) and clip.has_audio]
         self.classification_buffer = ""
         self.classification_error = ""
+        self.classification_error_bytes = b""
         self.classification_completed = 0
         self.classification_scanned = 0
         self.progress.setRange(0, len(clips))
@@ -604,6 +603,8 @@ class Application(QObject):
                      if self.music_device.currentData() == "cuda"
                      else ["-m", "fastvideoassembly.classification"])
         environment = QProcessEnvironment.systemEnvironment()
+        environment.insert("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+        environment.insert("PYTHONIOENCODING", "utf-8")
         if self.huggingface_token.text():
             environment.insert("HF_TOKEN", self.huggingface_token.text())
         self.classification_process.setProcessEnvironment(environment)
@@ -632,11 +633,28 @@ class Application(QObject):
         eta = (timestamp(remaining / rate) if self.classification_scanned else "--:--:--") if remaining else "00:00:00"
         self.progress.setFormat(f"Audio Classification - %v / %m - {rate:.1f} it/s - ETA {eta}")
 
-    def read_classification(self):
-        error = bytes(self.classification_process.readAllStandardError()).decode()
-        if error:
-            self.classification_error += error
+    def read_classification_error(self, final=False):
+        self.classification_error_bytes += bytes(self.classification_process.readAllStandardError())
+        while self.classification_error_bytes:
+            # ONNX Runtime's Windows logger writes colored UTF-16LE lines to stderr.
+            native = self.classification_error_bytes.startswith(b"\x1b\x00")
+            delimiter = b"\n\x00" if native else b"\n"
+            if delimiter not in self.classification_error_bytes:
+                if not final:
+                    break
+                line, self.classification_error_bytes = self.classification_error_bytes, b""
+            else:
+                line, self.classification_error_bytes = self.classification_error_bytes.split(delimiter, 1)
+            if native and line.endswith(b"\r"):
+                # Windows CRT text mode inserts a single-byte CR before the UTF-16 LF.
+                line = line[:-1]
+            error = line.decode("utf-16-le" if native else "utf-8")
+            error = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", error).rstrip("\r")
+            self.classification_error += error + "\n"
             self.log.appendPlainText(error)
+
+    def read_classification(self):
+        self.read_classification_error()
         self.classification_buffer += bytes(self.classification_process.readAllStandardOutput()).decode()
         while "\n" in self.classification_buffer:
             line, self.classification_buffer = self.classification_buffer.split("\n", 1)
@@ -649,6 +667,7 @@ class Application(QObject):
 
     def classification_finished(self, exit_code, exit_status):
         self.read_classification()
+        self.read_classification_error(final=True)
         self.classification_timer.stop()
         self.update_classification_progress()
         self.running = False
@@ -666,6 +685,9 @@ class Application(QObject):
             self.progress.setFormat("Audio Classification failed - %v / %m")
             self.window.statusBar().showMessage(message)
         else:
+            if exit_code != 0:
+                self.progress.setFormat("Audio Classification failed - %v / %m")
+                self.window.statusBar().showMessage(f"Audio Classification failed (exit {exit_code})")
             subprocess.CompletedProcess([self.classification_process.program(),
                 *self.classification_process.arguments()], exit_code).check_returncode()
             self.window.statusBar().showMessage("Audio Classification complete")
@@ -824,10 +846,6 @@ class Application(QObject):
             self.settings.value("audio/normalization", "None")
         )
         codec_form.addRow("Normalization", self.normalization)
-        self.normalize_button = QPushButton("Normalize Audio")
-        self.normalize_button.setToolTip("Measure missing True Peak adjustments and reuse saved measurements.")
-        self.normalize_button.clicked.connect(self.normalize_audio)
-        codec_form.addRow(self.normalize_button)
         self.analysis_workers = QSpinBox()
         self.analysis_workers.setRange(1, 32)
         self.analysis_workers.setValue(self.settings.value("audio/analysis_workers", 2, type=int))
@@ -849,7 +867,6 @@ class Application(QObject):
         self.normalization.currentTextChanged.connect(self.audio_settings_changed)
         self.audio_codec.currentIndexChanged.connect(self.audio_settings_changed)
         self.analysis_workers.valueChanged.connect(self.audio_settings_changed)
-        self.audio_settings_changed()
 
     def build_output_settings(self, view_menu):
         self.output_panel = QWidget()
@@ -942,7 +959,7 @@ class Application(QObject):
     def audio_settings_changed(self):
         self.normalization.setEnabled(self.audio_codec.currentData() != "none")
         mode = self.normalization.currentText()
-        self.normalize_button.setEnabled(
+        self.assembler.normalize_button.setEnabled(
             not self.loading and not self.running
             and self.audio_codec.currentData() != "none" and mode == "True Peak"
             and any(isinstance(clip, Clip) and clip.has_audio and str(clip.path) not in self.audio_muted
@@ -1078,7 +1095,6 @@ class Application(QObject):
     def create_timelines(self):
         if not self.assembler.keep_logs.isChecked():
             self.log.clear()
-        self.scanning_paused = False
         self.scan_stop_requested = False
         self.pending = [clip.path for clip in self.clips if isinstance(clip, Source)]
         if not self.pending:
@@ -1092,10 +1108,6 @@ class Application(QObject):
         self.scan_worker_count = (
             self.scan_threads.value() if self.parallel_scanning.isChecked() else 1
         )
-        for _ in range(len(self.probes), min(self.scan_worker_count, len(self.pending))):
-            probe = QProcess(self)
-            probe.finished.connect(partial(self.probed, probe))
-            self.probes.append(probe)
         self.loading = True
         self.update_enabled()
         self.probe_next()
@@ -1104,7 +1116,6 @@ class Application(QObject):
         if self.scan_stop_requested:
             if not self.probing_paths:
                 self.loading = False
-                self.scanning_paused = False
                 self.scan_stop_requested = False
                 self.window.statusBar().showMessage("Scanning stopped. Create Timelines to continue.")
                 self.log.appendPlainText("Scanning stopped. Create Timelines to continue.")
@@ -1112,51 +1123,22 @@ class Application(QObject):
             return
         if not self.pending and not self.probing_paths:
             self.loading = False
-            self.scanning_paused = False
             self.scan_stop_requested = False
             self.log.appendPlainText("Scanning completed")
             self.rebalance()
             return
-        if self.scanning_paused:
-            if not self.probing_paths:
-                self.scan_pause_started = monotonic()
-                self.window.statusBar().showMessage("Scanning paused")
-                self.log.appendPlainText("Scanning paused")
-            return
-        for probe in self.probes[:self.scan_worker_count]:
-            if self.pending and probe not in self.probing_paths:
-                path = self.pending.pop(0)
-                self.probing_paths[probe] = path
-                self.log_dock.show()
-                self.window.statusBar().showMessage(
-                    f"Scanning: {path.name}"
-                )
-                probe.start(
-                    self.ffprobe,
-                    [
-                        "-v",
-                        "error",
-                        "-show_streams",
-                        "-show_format",
-                        "-of",
-                        "json",
-                        str(path),
-                    ],
-                )
-
-    def pause_scanning(self):
-        self.scanning_paused = not self.scanning_paused
-        if not self.scanning_paused and not self.probing_paths:
-            self.scan_started += monotonic() - self.scan_pause_started
-        message = (
-            "Pausing scanning after active scans finish" if self.scanning_paused
-            else "Resuming scanning"
-        )
-        self.log_dock.show()
-        self.log.appendPlainText(message)
-        self.window.statusBar().showMessage(message)
-        self.update_enabled()
-        self.probe_next()
+        while self.pending and len(self.probing_paths) < self.scan_worker_count:
+            path = self.pending.pop(0)
+            command = (FFmpeg(self.ffprobe).option("v", "error")
+                       .option("show_streams").option("show_format").option("of", "json")
+                       .input(str(path)))
+            task = MediaTask(command, self)
+            self.probing_paths[task] = path
+            task.finished.connect(partial(self.probed, task))
+            task.stderr.connect(self.log.appendPlainText)
+            self.log_dock.show()
+            self.window.statusBar().showMessage(f"Scanning: {path.name}")
+            task.start()
 
     def stop_scanning(self):
         self.scan_stop_requested = True
@@ -1166,31 +1148,22 @@ class Application(QObject):
         self.update_enabled()
         self.probe_next()
 
-    def probed(self, probe, exit_code, exit_status):
-        path = self.probing_paths[probe]
-        stderr = bytes(probe.readAllStandardError()).decode().strip()
-        stdout = bytes(probe.readAllStandardOutput())
+    def probed(self, task):
+        path = self.probing_paths.pop(task)
+        task.deleteLater()
+        if task.future.exception() is not None:
+            self.scan_stop_requested = True
+            self.probe_next()
+        clip = clip_from_probe(path, json.loads(task.future.result()))
         index = next(i for i, source in enumerate(self.clips) if source.path == path)
-        if exit_code != 0:
-            self.log.appendPlainText(f"Skipped and removed from sources: {path}")
-            if self.selected_clip == self.clips[index]:
-                self.selected_clip = None
-                self.preview.player.stop()
-                self.preview.set_clip(None)
-            del self.clips[index]
-        else:
-            clip = clip_from_probe(path, json.loads(stdout))
-            if self.selected_clip == self.clips[index]:
-                self.selected_clip = clip
-            self.clips[index] = clip
-        if stderr:
-            self.log.appendPlainText(stderr)
+        if self.selected_clip == self.clips[index]:
+            self.selected_clip = clip
+        self.clips[index] = clip
         self.save_active_state()
         self.progress.setValue(self.progress.value() + 1)
         self.scan_completed += 1
         rate = self.scan_completed / (monotonic() - self.scan_started)
         self.progress.setFormat(f"%v / %m videos scanned - {rate:.1f} it/s")
-        del self.probing_paths[probe]
         self.probe_next()
 
     def clear(self):
@@ -1545,17 +1518,14 @@ class Application(QObject):
             clip.has_audio for index in self.target_timelines for clip in self.assembler.tracks[index]))
         self.assembler.classification_stop_button.setEnabled(
             self.running and self.classifying_music and self.classification_timer.isActive())
+        self.assembler.normalization_stop_button.setEnabled(self.running and self.normalizing_audio)
         self.assembler.create_button.setEnabled(idle and bool(self.clips))
-        self.assembler.scan_pause_button.setEnabled(self.loading and not self.scan_stop_requested)
-        self.assembler.scan_pause_button.setText("Resume" if self.scanning_paused else "Pause")
         self.assembler.scan_stop_button.setEnabled(self.loading and not self.scan_stop_requested)
         self.assembler.export_button.setEnabled(idle and all(self.assembler.tracks)
                                                 and any(box.isChecked() for box in self.assembler.division_checkboxes)
                                                 and (self.combine.isChecked() or self.assembler.render_timelines.isChecked()))
         for checkbox in self.assembler.division_checkboxes:
             checkbox.setEnabled(idle)
-        self.assembler.pause_button.setEnabled(self.running and not self.classifying_music)
-        self.assembler.pause_button.setText("Resume" if self.render_paused else "Pause")
         self.assembler.stop_button.setEnabled(self.running and
                                              (not self.classifying_music or self.classification_timer.isActive()))
         self.render_panel.setEnabled(idle)
@@ -1567,7 +1537,7 @@ class Application(QObject):
         self.preview.audio_controls.setEnabled(
             idle and isinstance(self.selected_clip, Clip) and self.selected_clip.has_audio
         )
-        self.normalize_button.setEnabled(
+        self.assembler.normalize_button.setEnabled(
             idle and self.audio_codec.currentData() != "none"
             and self.normalization.currentText() == "True Peak"
             and any(isinstance(clip, Clip) and clip.has_audio and str(clip.path) not in self.audio_muted
@@ -1633,8 +1603,6 @@ class Application(QObject):
         self.export_groups = [("Normalize Audio", 0, len(self.export_jobs))]
         self.export_index = 0
         self.stop_requested = False
-        self.render_paused = False
-        self.render_waiting = False
         self.progress.setValue(0)
         if not self.assembler.keep_logs.isChecked():
             self.log.clear()
@@ -1797,8 +1765,6 @@ class Application(QObject):
                 self.export_groups.append((f"Division {division_start // columns_per_division + 1} - " + ("FINAL" if count == columns_per_division else "FINAL " + "".join(timeline_name(i) for i in range(division_start, division_start + columns_per_division))), group_start, len(self.export_jobs)))
         self.export_index = 0
         self.stop_requested = False
-        self.render_paused = False
-        self.render_waiting = False
         self.progress.setValue(0)
         if not self.assembler.keep_logs.isChecked():
             self.log.clear()
@@ -1821,7 +1787,6 @@ class Application(QObject):
         self.stage_seconds = 0.0
         self.stage_started = monotonic()
         self.render_frames_per_second = 0.0
-        self.progress_buffer = ""
         path, self.stage_duration, args = self.export_jobs[self.export_index]
         measuring = self.export_index in self.measurement_keys
         self.measuring_audio = measuring
@@ -1835,7 +1800,6 @@ class Application(QObject):
                 args = args(peak=self.audio_peaks[path])
             else:
                 args = args()
-        self.stage_log = ""
         operation = "Measuring audio" if measuring else "Rendering"
         self.stage_description = f"{operation} - {path.name}"
         self.update_export_progress()
@@ -1846,10 +1810,14 @@ class Application(QObject):
         self.log.appendPlainText(f"{operation} {path}\n")
         if path in self.replace_outputs:
             args[args.index("-n")] = "-y"
-        self.process.start(self.ffmpeg, args)
+        self.render_task = MediaTask(MediaCommand(self.ffmpeg, args), self)
+        self.render_task.progress.connect(self.render_progress)
+        self.render_task.stderr.connect(self.log.appendPlainText)
+        self.render_task.finished.connect(self.render_finished)
+        self.render_task.start()
 
     def start_measurement_batch(self):
-        self.measurement_exit_code = 0
+        self.measurement_failure = None
         self.measurement_last = self.export_index
         self.measurement_seconds = {}
         for index in range(self.export_index, min(len(self.export_jobs), self.export_index + self.analysis_workers.value())):
@@ -1860,49 +1828,33 @@ class Application(QObject):
                 break
             if callable(args):
                 args = args()
-            process = QProcess(self)
-            process.started.connect(partial(self.log.appendPlainText, f"FFmpeg started: {path.name}"))
-            self.measurement_processes[process] = [index, "", "", None]
+            task = MediaTask(MediaCommand(self.ffmpeg, args), self)
+            self.measurement_processes[task] = index
             self.measurement_seconds[index] = 0.0
-            process.readyReadStandardOutput.connect(partial(self.read_measurement, process))
-            process.readyReadStandardError.connect(partial(self.read_measurement, process))
-            process.finished.connect(partial(self.measurement_finished, process))
+            task.progress.connect(partial(self.measurement_progress, task))
+            task.stderr.connect(self.log.appendPlainText)
+            task.finished.connect(partial(self.measurement_finished, task))
             self.measurement_last = index
             self.log.appendPlainText(f"Measuring audio {path}\n")
-            process.start(self.ffmpeg, args)
+            task.start()
         self.update_export_progress()
 
-    def read_measurement(self, process):
-        state = self.measurement_processes[process]
-        index = state[0]
-        state[1] += bytes(process.readAllStandardOutput()).decode()
-        text = bytes(process.readAllStandardError()).decode()
-        state[2] += text
-        if text:
-            self.log.appendPlainText(text)
-        while "\n" in state[1]:
-            line, state[1] = state[1].split("\n", 1)
-            if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
-                seconds = max(self.measurement_seconds[index], min(self.export_jobs[index][1] * 0.999, int(line[12:]) / 1_000_000))
-                if seconds > self.measurement_seconds[index]:
-                    now = monotonic()
-                    if state[3] is None or now - state[3] >= 5:
-                        path, duration, _ = self.export_jobs[index]
-                        self.log.appendPlainText(
-                            f"Measured audio {path.name}: {seconds:.1f} / {duration:.1f} s"
-                        )
-                        state[3] = now
-                self.measurement_seconds[index] = seconds
+    def measurement_progress(self, task, progress):
+        index = self.measurement_processes[task]
+        self.measurement_seconds[index] = max(
+            self.measurement_seconds[index],
+            min(self.export_jobs[index][1] * 0.999, progress.time.total_seconds()),
+        )
         self.stage_seconds = sum(self.measurement_seconds.values())
         self.update_export_progress()
 
-    def measurement_finished(self, process, exit_code, exit_status):
-        self.read_measurement(process)
-        index, _, log, _ = self.measurement_processes.pop(process)
-        process.deleteLater()
-        self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
-        if exit_code == 0 and not self.stop_requested:
-            measured = json.loads(log[log.rindex("{"):log.rindex("}") + 1])
+    def measurement_finished(self, task):
+        index = self.measurement_processes.pop(task)
+        if task.future.exception() is not None:
+            self.measurement_failure = task
+        elif not self.stop_requested:
+            first = task.lines.index("{")
+            measured = json.loads("\n".join(task.lines[first:task.lines.index("}", first) + 1]))
             self.audio_peaks[self.measurement_keys[index]] = float(measured["input_tp"])
             self.normalization_cache[self.measurement_cache_keys[index]] = measured["input_tp"]
             self.save_active_state()
@@ -1914,27 +1866,16 @@ class Application(QObject):
                 f"{self.export_jobs[index][1]:.1f} s, true peak {measured['input_tp']} dBTP"
             )
             self.update_runtime()
-        if exit_code != 0:
-            self.measurement_exit_code = exit_code
-            self.measurement_last = index
+        task.deleteLater()
         if self.measurement_processes:
             return
         self.stage_seconds = sum(self.measurement_seconds.values())
         self.update_export_progress()
         self.export_index = self.measurement_last
-        self.advance_export(self.measurement_exit_code)
-
-    def pause_export(self):
-        self.render_paused = not self.render_paused
-        message = "Pausing after active work finishes" if self.render_paused else "Resuming work"
-        self.log_dock.show()
-        self.log.appendPlainText(message)
-        self.window.statusBar().showMessage(message)
-        self.update_enabled()
-        if not self.render_paused and self.render_waiting:
-            self.group_started += monotonic() - self.render_pause_started
-            self.render_waiting = False
-            self.start_export_job()
+        failure = self.measurement_failure
+        self.advance_export(failure is None)
+        if failure is not None:
+            failure.future.result()
 
     def stop_export(self):
         self.stop_requested = True
@@ -1951,27 +1892,18 @@ class Application(QObject):
                 return
             subprocess.run(["taskkill", "/PID", str(self.classification_process.processId()), "/T", "/F"],
                            check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-        elif self.render_waiting:
-            self.end_export("Rendering stopped")
         elif self.measurement_processes:
             for process in list(self.measurement_processes):
-                process.kill()
+                process.stop()
         else:
-            self.process.kill()
+            self.render_task.stop()
 
-    def read_progress(self):
-        self.progress_buffer += bytes(self.process.readAllStandardOutput()).decode()
-        while "\n" in self.progress_buffer:
-            line, self.progress_buffer = self.progress_buffer.split("\n", 1)
-            if line.startswith("fps="):
-                self.render_frames_per_second = float(line[4:])
-                self.update_runtime()
-            if line.startswith("out_time_us=") and line[12:].strip() != "N/A":
-                self.stage_seconds = max(
-                    self.stage_seconds,
-                    min(self.stage_duration * 0.999, int(line[12:]) / 1_000_000),
-                )
-                self.update_export_progress()
+    def render_progress(self, progress):
+        self.render_frames_per_second = progress.fps
+        self.stage_seconds = max(
+            self.stage_seconds, min(self.stage_duration * 0.999, progress.time.total_seconds()),
+        )
+        self.update_export_progress()
 
     def update_export_progress(self):
         total = sum(job[1] for job in self.export_jobs[self.group_start:self.group_end])
@@ -2002,10 +1934,6 @@ class Application(QObject):
             )
         if self.stop_requested:
             self.window.statusBar().showMessage("Stop requested. Waiting for active work to exit")
-        elif self.render_paused:
-            self.window.statusBar().showMessage(
-                "Rendering paused" if self.render_waiting else "Pausing after active work finishes"
-            )
         elif self.measuring_audio:
             self.window.statusBar().showMessage(self.stage_description)
         else:
@@ -2013,56 +1941,43 @@ class Application(QObject):
                 f"{self.stage_description}. Runtime {elapsed}"
             )
 
-    def read_log(self):
-        text = bytes(self.process.readAllStandardError()).decode()
-        self.stage_log += text
-        self.log.appendPlainText(text)
-
-    def finished(self, exit_code, exit_status):
-        self.read_progress()
-        self.read_log()
-        if exit_code == 0 and not self.stop_requested:
+    def render_finished(self):
+        task = self.render_task
+        success = task.future.exception() is None
+        if success and not self.stop_requested:
             self.stage_seconds = self.stage_duration
             self.update_export_progress()
-        self.log.appendPlainText(f"FFmpeg exited with code {exit_code}")
-        self.advance_export(exit_code)
+        task.deleteLater()
+        self.advance_export(success)
+        task.future.result()
 
-    def advance_export(self, exit_code):
-        if exit_code == 0 and not self.stop_requested and self.export_index in self.column_cleanup:
+    def advance_export(self, success):
+        if success and not self.stop_requested and self.export_index in self.column_cleanup:
             for path in self.column_cleanup[self.export_index]:
                 path.unlink()
         if (
-            exit_code == 0
+            success
             and not self.stop_requested
             and self.export_index + 1 < len(self.export_jobs)
         ):
             self.export_index += 1
-            if self.render_paused:
-                self.runtime_timer.stop()
-                self.render_waiting = True
-                self.render_pause_started = monotonic()
-                self.window.statusBar().showMessage("Rendering paused")
-                self.log.appendPlainText("Rendering paused")
-                self.update_enabled()
-            else:
-                self.start_export_job()
+            self.start_export_job()
             return
         self.end_export(
-            "Rendering stopped" if self.stop_requested else f"FFmpeg exited with code {exit_code}"
+            "Rendering stopped" if self.stop_requested else "Processing complete" if success else "Processing failed"
         )
 
     def end_export(self, result):
         self.runtime_timer.stop()
         self.running = False
-        self.render_paused = False
-        self.render_waiting = False
-        self.export_directory.cleanup()
-        self.export_directory = None
+        self.normalizing_audio = False
         self.window.statusBar().showMessage(
             f"{result} - {self.export_jobs[self.export_index][0]}"
         )
         self.log.appendPlainText(f"{result} - {self.export_jobs[self.export_index][0]}")
         self.update_enabled()
+        self.export_directory.cleanup()
+        self.export_directory = None
 
     def check_updates(self):
         dialog = UpdateDialog(self)
@@ -2091,6 +2006,13 @@ class Application(QObject):
         if event.type() == QEvent.Type.Close:
             if self.running or self.loading:
                 event.ignore()
+                return True
+            self.preview.cancel_audio()
+            if self.preview.audio_tasks:
+                event.ignore()
+                for task in self.preview.audio_tasks:
+                    task.stop()
+                    task.finished.connect(self.window.close)
                 return True
             self.preview.player.stop()
             self.preview.set_clip(None)

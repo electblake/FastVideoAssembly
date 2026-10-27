@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from ffmpeg import FFmpegError
 from PySide6.QtCore import Qt
 from PySide6.QtMultimedia import QMediaPlayer
 
@@ -176,6 +177,12 @@ def test_gain_apply_reset_and_restart(
     assert restored.render_config().audio_gains == {str(preview_source): 6}
     controller.select_clip(None)
     assert not preview.audio_controls.isEnabled()
+    controller.select_clip(clip)
+    directories = [Path(task.command.arguments[-1]).parent for task in preview.audio_tasks]
+    assert directories
+    controller.window.close()
+    qtbot.waitUntil(lambda: not preview.audio_tasks and not controller.window.isVisible(), timeout=15000)
+    assert all(not directory.exists() for directory in directories)
 
 
 def test_two_divisions_render_independent_triples(
@@ -234,7 +241,7 @@ def test_two_divisions_render_independent_triples(
     ]
     assert [group[0] for group in controller.export_groups] == expected_groups
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
-    assert controller.process.exitCode() == 0
+    assert controller.render_task.future.exception() is None
     assert bool(second_division_jobs) == combine
     outputs = (list(letters) if render_timelines else []) + (
         [f"FINAL_{first}", f"FINAL_{second}"] if combine else []
@@ -300,7 +307,7 @@ def test_direct_division_preserves_existing_interims(
         (tmp_path / f"direct_{letter}.mp4").write_bytes(b"existing interim")
     controller.start_export(tmp_path / "direct.mp4")
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
-    assert controller.process.exitCode() == 0
+    assert controller.render_task.future.exception() is None
     assert len(controller.export_jobs) == (3 if normalization == "True Peak" else 1)
     assert len(controller.audio_peaks) == (2 if normalization == "True Peak" else 0)
     for letter in "ABC":
@@ -329,6 +336,27 @@ def test_direct_division_preserves_existing_interims(
 def test_render_protection_stop_and_failure(
     controller, preview_source, tmp_path, qtbot, monkeypatch
 ):
+    controller.clips = [Clip(preview_source, 3, 60, 120, True)]
+    controller.normalization.setCurrentText("True Peak")
+    assert not controller.assembler.normalization_stop_button.isEnabled()
+    controller.assembler.normalize_button.click()
+    temporary = Path(controller.export_directory.name)
+    assert controller.measurement_processes
+    assert controller.assembler.normalization_stop_button.isEnabled()
+    assert not controller.assembler.normalize_button.isEnabled()
+    controller.assembler.normalization_stop_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=15000)
+    assert controller.stop_requested
+    assert not controller.measurement_processes
+    assert not controller.normalization_cache
+    assert not temporary.exists()
+    assert controller.assembler.normalize_button.isEnabled()
+    assert not controller.assembler.normalization_stop_button.isEnabled()
+    controller.assembler.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=15000)
+    assert controller.normalization_cache
+    assert not controller.assembler.normalization_stop_button.isEnabled()
+
     suffix = "_FINAL"
     with monkeypatch.context() as patch:
         output = tmp_path / "assembly.mp4"
@@ -361,62 +389,58 @@ def test_render_protection_stop_and_failure(
             audio_codec="none",
         )
         patch.setattr(controller, "render_config", lambda: config)
-        controller.combine.setChecked(False)
+        # Stopping the launcher left FFmpeg holding a segment open and the UI locked.
+        # Retire after: first release containing this fix
+        controller.combine.setChecked(True)
+        controller.assembler.render_timelines.setChecked(False)
+        controller.assembler.tracks = [
+            [Clip(preview_source, 3, 60, 120)] * 9 for _ in range(3)
+        ]
+        segment_arguments = app.division_segment_arguments
+
+        def paced_segment(*args):
+            arguments = segment_arguments(*args)
+            arguments.insert(arguments.index("-i"), "-re")
+            return arguments
+
+        patch.setattr(app, "division_segment_arguments", paced_segment)
+        controller.start_export(tmp_path / "stopped.mp4")
+        temporary = Path(controller.export_directory.name)
+        qtbot.waitUntil(lambda: controller.stage_seconds > 0, timeout=15000)
+        controller.assembler.stop_button.click()
+        qtbot.waitUntil(lambda: not controller.running, timeout=15000)
+        assert controller.render_task.future.done()
+        assert not controller.running
+        assert controller.render_panel.isEnabled()
+        assert controller.library.isEnabled()
+        assert controller.assembler.export_button.isEnabled()
+        assert not controller.assembler.stop_button.isEnabled()
+        assert controller.export_index == 0
+        assert controller.export_directory is None
+        assert not temporary.exists()
+
         controller.assembler.tracks = [
             [Clip(preview_source, 0.3, 60, 120)] for _ in range(3)
         ]
-        jobs = []
-        start = controller.start_export_job
-
-        def record_start():
-            jobs.append(controller.export_index)
-            start()
-
-        patch.setattr(controller, "start_export_job", record_start)
-        controller.start_export(tmp_path / "paused.mp4")
-        controller.assembler.pause_button.click()
-        assert "Pausing after active work finishes" in controller.log.toPlainText()
-        controller.runtime_timer.timeout.emit()
-        assert (
-            controller.window.statusBar().currentMessage()
-            == "Pausing after active work finishes"
-        )
-        qtbot.waitUntil(lambda: controller.render_waiting, timeout=15000)
-        assert "Rendering paused" in controller.log.toPlainText()
-        assert controller.window.statusBar().currentMessage() == "Rendering paused"
-        temporary = Path(controller.export_directory.name)
-        assert temporary.exists()
-        assert controller.export_jobs[0][0].exists()
-        assert jobs == [0]
-        assert controller.export_index == 1
-        assert controller.running
-        assert controller.assembler.pause_button.text() == "Resume"
-        assert not controller.assembler.scan_pause_button.isEnabled()
-        assert not controller.assembler.create_button.isEnabled()
-        assert controller.process.state() == app.QProcess.ProcessState.NotRunning
-        controller.assembler.stop_button.click()
-        assert (
-            "Stop requested. Waiting for active work to exit"
-            in controller.log.toPlainText()
-        )
-        assert "Rendering stopped" in controller.log.toPlainText()
-        assert jobs == [0]
-        assert not controller.running
-        assert not controller.render_waiting
-        assert not controller.render_paused
-        assert not temporary.exists()
+        controller.start_export(tmp_path / "restarted.mp4")
+        qtbot.waitUntil(lambda: not controller.running, timeout=15000)
+        assert controller.render_task.future.exception() is None
+        assert (tmp_path / "restarted_FINAL.mp4").exists()
         assert controller.export_directory is None
-        assert not controller.assembler.pause_button.isEnabled()
-        assert not controller.assembler.stop_button.isEnabled()
 
+    controller.assembler.render_timelines.setChecked(True)
+    controller.combine.setChecked(False)
     controller.assembler.tracks = [
         [Clip(tmp_path / "missing.mp4", 1, 90, 160)] for _ in range(3)
     ]
     output = tmp_path / "failed.mp4"
-    controller.start_export(output)
-    temporary = Path(controller.export_directory.name)
-    qtbot.waitUntil(lambda: not controller.running, timeout=30000)
-    assert controller.process.exitCode() != 0
+    with qtbot.captureExceptions() as exceptions:
+        controller.start_export(output)
+        temporary = Path(controller.export_directory.name)
+        qtbot.waitUntil(lambda: not controller.running, timeout=30000)
+    assert len(exceptions) == 1
+    assert isinstance(exceptions[0][1], FFmpegError)
+    assert isinstance(controller.render_task.future.exception(), FFmpegError)
     assert controller.export_index == 0
     assert controller.export_directory is None
     assert not temporary.exists()

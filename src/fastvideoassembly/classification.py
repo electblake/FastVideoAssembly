@@ -1,12 +1,16 @@
 """CLAP classification worker, emitting one saved score per source clip."""
 
+import gc
 import json
-import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from itertools import islice
-from tempfile import TemporaryFile
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from threading import Lock, local
+from time import sleep
+
+from ffmpeg import FFmpeg
 
 MODEL_ID = "Xenova/clap-htsat-unfused"
 MODEL_FILE = "onnx/model_fp16.onnx"
@@ -20,16 +24,16 @@ def create_classifier(device, precision, gpu_index, cache_dir):
     import torch
     from huggingface_hub import hf_hub_download
     from transformers import (
-        AutoProcessor,
         ClapConfig,
         ClapModel,
+        ClapProcessor,
         PreTrainedModel,
         pipeline,
     )
     from transformers.utils import ModelOutput
 
     if device == "cuda":
-        processor = AutoProcessor.from_pretrained(GPU_MODEL_ID, cache_dir=cache_dir)
+        processor = ClapProcessor.from_pretrained(GPU_MODEL_ID, cache_dir=cache_dir)
         dtype = {"float16": torch.float16, "float32": torch.float32}[precision]
         model = ClapModel.from_pretrained(GPU_MODEL_ID, cache_dir=cache_dir, dtype=dtype,
                                          use_safetensors=False)
@@ -65,7 +69,7 @@ def create_classifier(device, precision, gpu_index, cache_dir):
             )
             return ModelOutput(logits_per_audio=torch.from_numpy(np.asarray(logits)))
 
-    processor = AutoProcessor.from_pretrained(MODEL_ID, cache_dir=cache_dir)
+    processor = ClapProcessor.from_pretrained(MODEL_ID, cache_dir=cache_dir)
     return pipeline(
         task="zero-shot-audio-classification", model=OnnxClapModel().eval(),
         tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor,
@@ -78,18 +82,17 @@ def classify_clip(classifier, ffmpeg, path, duration, labels):
 
     candidates = list(dict.fromkeys([*labels.values(), *BACKGROUND_LABELS]))
     scores = {category: [] for category in labels}
-    with TemporaryFile() as decoded:
-        subprocess.run(
-            [ffmpeg, "-v", "error", "-nostdin", "-i", path,
-             "-t", str(duration), "-map", "0:a:0",
-             "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"],
-            check=True, stdout=decoded,
-        )
-        decoded.seek(0)
-        while audio := decoded.read(WINDOW_SECONDS * 48000 * 4):
-            results = classifier(np.frombuffer(audio, dtype=np.float32), candidate_labels=candidates)
-            for category, label in labels.items():
-                scores[category].append(next(result["score"] for result in results if result["label"] == label))
+    with TemporaryDirectory(prefix="fastvideoassembly-classify-") as directory:
+        output = Path(directory) / "audio.f32"
+        command = (FFmpeg(ffmpeg).option("v", "error").option("nostdin")
+                   .input(path).output(str(output), t=duration, map="0:a:0", ac=1, ar=48000, f="f32le"))
+        command.on("stderr", lambda line: print(line, file=sys.stderr, flush=True))
+        command.execute()
+        with output.open("rb") as decoded:
+            while audio := decoded.read(WINDOW_SECONDS * 48000 * 4):
+                results = classifier(np.frombuffer(audio, dtype=np.float32), candidate_labels=candidates)
+                for category, label in labels.items():
+                    scores[category].append(next(result["score"] for result in results if result["label"] == label))
     return {category: max(values) for category, values in scores.items()}
 
 
@@ -99,15 +102,32 @@ def main():
     initialization_lock = Lock()
 
     def classify(clip):
-        if not hasattr(worker, "classifier"):
-            # Transformers lazy imports and model setup must finish before another worker initializes.
-            with initialization_lock:
-                worker.classifier = create_classifier(
-                    request["device"], request["precision"], request["gpu_index"], request["cache_dir"]
-                )
-        score = classify_clip(worker.classifier, request["ffmpeg"], clip["path"],
-                              clip["duration"], request["labels"])
-        return {"key": clip["key"], "path": clip["path"], "score": score}
+        for attempt in range(4):
+            try:
+                if not hasattr(worker, "classifier"):
+                    # Transformers lazy imports and model setup must finish before another worker initializes.
+                    with initialization_lock:
+                        worker.classifier = create_classifier(
+                            request["device"], request["precision"], request["gpu_index"], request["cache_dir"]
+                        )
+                score = classify_clip(worker.classifier, request["ffmpeg"], clip["path"],
+                                      clip["duration"], request["labels"])
+                return {"key": clip["key"], "path": clip["path"], "score": score}
+            except Exception as error:
+                memory_failure = (
+                    isinstance(error, MemoryError)
+                    or (isinstance(error, OSError) and (
+                        error.errno == 12 or getattr(error, "winerror", None) in (8, 14, 1455)))
+                    or any(message in (str(error) + str(getattr(error, "stderr", ""))).lower() for message in (
+                        "out of memory", "not enough memory", "bad allocation", "bad_alloc",
+                        "cannot allocate memory", "failed to allocate memory", "paging file is too small")))
+                if not memory_failure or attempt == 3:
+                    raise
+                print(f"Memory exhaustion for {clip['path']}: {error}. "
+                      f"Retry {attempt + 1}/3 in 5 seconds.", file=sys.stderr, flush=True)
+            # Drop failed inference frames before waiting for memory to become available.
+            gc.collect()
+            sleep(5)
 
     with ThreadPoolExecutor(max_workers=request["threads"]) as executor:
         clips = iter(request["clips"])
