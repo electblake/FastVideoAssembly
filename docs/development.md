@@ -12,6 +12,10 @@
 ## Checks
 
 - Run `uv run pytest` and `uv run ruff check .`.
+- Keep regression coverage in three domain suites: `tests/test_app.py` (editing, preview, persistence, export), `tests/test_media.py` (assembly, timeline ordering, rendered frames, audio), and `tests/test_services.py` (classification workers, runtime setup, hardware selection, updates).
+- Test related actions as one workflow using the same application instance. Create another instance only to verify restart behavior; keep separate workflows independent.
+- Reuse the session-scoped `preview_source` fixture as read-only media. Write derived media and outputs under each test's `tmp_path`.
+- Cover representative render paths at small resolutions. Avoid restoring exhaustive codec/layout/normalization matrices or per-control window launches.
 - Application test fixtures default to no-profile, minimized windows. Preserve these defaults in new tests.
 - Mark persistence tests with `@pytest.mark.profile`; their settings use an isolated temporary directory.
 - Pass `-NoProfile -Minimize` to application subprocesses in tests. These flags belong to the app, not pytest or FFmpeg.

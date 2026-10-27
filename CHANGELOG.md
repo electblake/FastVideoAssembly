@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced regression coverage from 445 cases to 18 critical workflows across application, media, and service suites, sharing application instances within workflows and generating preview media once per session.
+- Documented the compact suite structure and representative render coverage to limit repeated window and process launches.
+
 ## [0.8.4] - 2026-10-26
 
 ### Changed
