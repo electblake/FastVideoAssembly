@@ -1,10 +1,23 @@
 """Run python-ffmpeg commands off the Qt UI thread."""
 
 import asyncio
+import subprocess
+from functools import partial
 from threading import Thread
 
+import ffmpeg.asyncio.ffmpeg as ffmpeg_api
+import win32api
+import win32console
 from ffmpeg.asyncio import FFmpeg
 from PySide6.QtCore import QObject, Signal
+
+# Keep the library's process group for cancellation, but never show its console.
+ffmpeg_api.create_subprocess = partial(
+    ffmpeg_api.create_subprocess,
+    startupinfo=subprocess.STARTUPINFO(
+        dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=subprocess.SW_HIDE,
+    ),
+)
 
 
 class MediaCommand(FFmpeg):
@@ -59,4 +72,12 @@ class MediaTask(QObject):
         self.stop_requested = True
         if self.active and not self.terminated and not self.execution.done():
             self.terminated = True
+            # pythonw must attach to the hidden console to send CTRL_BREAK_EVENT.
+            # Restore its standard handles so subsequent jobs can still launch.
+            handles = {kind: win32api.GetStdHandle(kind) for kind in (-10, -11, -12)}
+            win32console.FreeConsole()
+            win32console.AttachConsole(self.command._process.pid)
             self.command.terminate()
+            win32console.FreeConsole()
+            for kind, handle in handles.items():
+                win32api.SetStdHandle(kind, handle)

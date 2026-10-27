@@ -1,6 +1,6 @@
 [project]
 name = "fastvideoassembly"
-version = "0.8.6"
+version = "0.8.7"
 description = "Assemble portrait videos into balanced side-by-side timelines"
 readme = "README.md"
 license = "MIT"
@@ -19,6 +19,7 @@ dependencies = [
     "numpy>=2.5.4",
     "uv>=0.13.5",
     "python-ffmpeg>=2.0.12",
+    "pywin32>=312",
 ]
 
 [build-system]

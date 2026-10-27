@@ -2,15 +2,25 @@
 
 import gc
 import json
+import subprocess
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from functools import partial
 from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock, local
 from time import sleep
 
+import ffmpeg.ffmpeg as ffmpeg_api
 from ffmpeg import FFmpeg
+
+ffmpeg_api.create_subprocess = partial(
+    ffmpeg_api.create_subprocess,
+    startupinfo=subprocess.STARTUPINFO(
+        dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=subprocess.SW_HIDE,
+    ),
+)
 
 MODEL_ID = "Xenova/clap-htsat-unfused"
 MODEL_FILE = "onnx/model_fp16.onnx"

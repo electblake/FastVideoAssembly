@@ -2,9 +2,17 @@
 
 import json
 import subprocess
-from functools import cache
+from functools import cache, partial
 
+import ffmpeg.ffmpeg as ffmpeg_api
 from ffmpeg import FFmpeg
+
+ffmpeg_api.create_subprocess = partial(
+    ffmpeg_api.create_subprocess,
+    startupinfo=subprocess.STARTUPINFO(
+        dwFlags=subprocess.STARTF_USESHOWWINDOW, wShowWindow=subprocess.SW_HIDE,
+    ),
+)
 
 
 @cache

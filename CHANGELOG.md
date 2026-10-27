@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-10-27
+
+### Fixed
+
+- Started FFmpeg and FFprobe consoles hidden so rendering, preview, probing, and classification no longer open terminal windows or steal focus, while retaining `python-ffmpeg` cancellation.
+- Fixed Stop in the installed windowless Python runtime and preserved standard handles so subsequent jobs can launch after cancellation.
+
 ## [0.8.6] - 2026-10-27
 
 ### Changed
