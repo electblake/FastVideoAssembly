@@ -31,6 +31,7 @@ Follow [the test execution and lifecycle policy](../AGENTS.md#test-execution-and
 - Interim mode encodes each timeline from its sources in one FFmpeg process, then encodes the final stacked composition from those files.
 - Direct final mode bounds decoder count and command size with temporary compressed video segments, joined without another video encode. Audio is mixed continuously during the join.
 - Audio timestamps retain their relationship to video, including delayed starts and silent gaps.
+- Normalize Audio caches source peaks and the final mix peak for each selected, populated division when final output is enabled. Both render modes measure the mix from normalized source audio with the current mutes and manual gains, before interim audio encoding. An unchanged render reuses these measurements; changing sources, timeline order, frame rate, mutes, gains, audio codec, or interim mode changes the mix cache key.
 - Crop, frame-rate conversion, padding, concatenation, and stacking use CPU filters. Hardware decoding or scaling does not guarantee faster rendering.
 - Temporary filter graphs and direct-render segments are removed when processing completes or is canceled.
 - Settings use QSettings under `platformdirs.user_config_path(APP_NAME, appauthor=False)`.

@@ -77,7 +77,7 @@ from .assembly import (
     timeline_name,
     video_paths,
 )
-from .audio import mix_peak_arguments, normalization_filter, peak_measurement_arguments
+from .audio import normalization_filter, peak_measurement_arguments
 from .classification import (
     BACKGROUND_LABELS,
     GPU_MODEL_ID,
@@ -136,6 +136,7 @@ class Application(QObject):
                 QSettings.Format.IniFormat,
             )
         self.clips = []
+        self.missing_sources = set()
         self.pending = []
         self.loading = False
         self.running = False
@@ -275,6 +276,10 @@ class Application(QObject):
         self.library.currentRowChanged.connect(self.select_source)
         self.library.itemSelectionChanged.connect(self.select_source)
         library_layout.addWidget(self.library)
+        self.remove_missing_button = QPushButton("Remove missing (0)")
+        self.remove_missing_button.setEnabled(False)
+        self.remove_missing_button.clicked.connect(self.remove_missing_sources)
+        library_layout.addWidget(self.remove_missing_button)
         self.remove_sources_button = QPushButton("Remove selected")
         self.remove_sources_button.clicked.connect(self.remove_selected_clip)
         library_layout.addWidget(self.remove_sources_button)
@@ -1245,6 +1250,7 @@ class Application(QObject):
         self.window.statusBar().showMessage("Ready")
 
     def refresh(self):
+        self.update_missing_sources()
         self.update_project_from_folder()
         selected_paths = {
             item.data(Qt.ItemDataRole.UserRole).path
@@ -1458,6 +1464,23 @@ class Application(QObject):
         self.selected_clip = None
         self.finish_timeline_edit()
 
+    def update_missing_sources(self):
+        self.missing_sources = {clip.path for clip in self.clips if not clip.path.is_file()}
+        self.remove_missing_button.setText(f"Remove missing ({len(self.missing_sources)})")
+        self.remove_missing_button.setEnabled(
+            not self.loading and not self.running and bool(self.missing_sources)
+        )
+
+    def remove_missing_sources(self):
+        self.update_missing_sources()
+        self.clips = [clip for clip in self.clips if clip.path not in self.missing_sources]
+        self.assembler.tracks = [
+            [clip for clip in track if clip.path not in self.missing_sources]
+            for track in self.assembler.tracks
+        ]
+        self.selected_clip = None
+        self.finish_timeline_edit()
+
     def move_selected_clips(self, target):
         selected = self.selected_clips
         config = self.render_config()
@@ -1549,6 +1572,7 @@ class Application(QObject):
         self.assembler.remove_button.setEnabled(removable)
         self.assembler.select_none_button.setEnabled(removable)
         self.remove_sources_button.setEnabled(removable)
+        self.remove_missing_button.setEnabled(idle and bool(self.missing_sources))
         self.clear_sources_button.setEnabled(idle and bool(self.clips))
         self.parallel_scanning.setEnabled(idle)
         self.scan_threads.setEnabled(idle)
@@ -1567,6 +1591,7 @@ class Application(QObject):
         self.assembler.end_button.setEnabled(later)
 
     def choose_export(self):
+        self.update_missing_sources()
         if not self.output_folder.text().strip():
             self.window.statusBar().showMessage(
                 "Export stopped: select an output folder in Output Settings."
@@ -1600,6 +1625,37 @@ class Application(QObject):
                 self.measurement_keys[index] = clip.path
                 self.measurement_cache_keys[index] = cache_key
                 self.export_jobs.append((clip.path, clip.duration, peak_measurement_arguments(clip)))
+        config = self.render_config()
+        columns = self.assembler.columns.currentData()
+        graph_root = Path(self.export_directory.name)
+        if self.combine.isChecked():
+            for division, checkbox in enumerate(self.assembler.division_checkboxes):
+                tracks = self.assembler.tracks[division * columns:(division + 1) * columns]
+                if not checkbox.isChecked() or not all(tracks):
+                    continue
+                cache_key = json.dumps([
+                    "mix-v4", self.assembler.render_timelines.isChecked(), config.audio_codec, config.fps,
+                    [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config),
+                      config.audio_gains.get(str(clip.path)), str(clip.path) in config.audio_muted]
+                      for clip in track] for track in tracks],
+                ])
+                if not any(clip.has_audio and str(clip.path) not in config.audio_muted
+                           for track in tracks for clip in track):
+                    continue
+                path = graph_root / f"FINAL_{division + 1}.mp4"
+                if cache_key in self.normalization_cache:
+                    self.audio_peaks[path] = float(self.normalization_cache[cache_key])
+                    continue
+                duration = max(sum(clip_duration(clip, config) for clip in track) for track in tracks)
+                index = len(self.export_jobs)
+                self.measurement_keys[index] = path
+                self.measurement_cache_keys[index] = cache_key
+                self.export_jobs.append((
+                    path, duration, partial(
+                        division_arguments, tracks, duration, path,
+                        graph_root / f"mix{division}.ffgraph", config, self.audio_peaks, measure=True,
+                    ),
+                ))
         self.export_groups = [("Normalize Audio", 0, len(self.export_jobs))]
         self.export_index = 0
         self.stop_requested = False
@@ -1716,7 +1772,7 @@ class Application(QObject):
                 graph_path = graph_root / f"composition{division_start // columns_per_division}.ffgraph"
                 if config.audio_codec != "none" and config.normalization == "True Peak":
                     cache_key = json.dumps([
-                        "mix-v3", render_timelines, config.audio_codec, config.fps,
+                        "mix-v4", render_timelines, config.audio_codec, config.fps,
                         [[self.source_audio_key(clip) + [clip.has_audio, clip_duration(clip, config),
                           config.audio_gains.get(str(clip.path)), str(clip.path) in config.audio_muted]
                           for clip in track] for track in group_tracks],
@@ -1733,7 +1789,7 @@ class Application(QObject):
                             (
                                 output,
                                 duration,
-                                mix_peak_arguments(group_columns, duration) if render_timelines else partial(
+                                partial(
                                     division_arguments, group_tracks, duration, output,
                                     graph_root / f"mix{division_start}.ffgraph", config, self.audio_peaks, measure=True,
                                 ),

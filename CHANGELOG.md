@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.8.9] - 2026-10-27
+
+### Added
+
+- Added Remove missing below Sources, showing the missing-file count and removing those sources and their timeline clips when clicked.
+
+### Changed
+
+- Extended Normalize Audio to cache final mix measurements for selected, populated divisions with the current mutes and gains, so unchanged renders do not repeat audio measurement.
+- Measured final mixes from normalized source audio before interim encoding in both render modes, while preserving classification scores and source measurements.
+
 ## [0.8.8] - 2026-10-27
 
 ### Fixed

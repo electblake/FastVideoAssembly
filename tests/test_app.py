@@ -13,9 +13,10 @@ from fastvideoassembly.classification import GPU_MODEL_ID
 
 
 @pytest.mark.profile
-def test_edit_preview_and_profile_workflow(controller, preview_source, tmp_path, qtbot):
+def test_edit_preview_and_profile_workflow(controller, preview_source, tmp_path, qtbot, monkeypatch):
     assert controller.window.isMinimized()
     assert not controller.window.isActiveWindow()
+    assert not controller.remove_missing_button.isEnabled()
 
     controller.add_paths([preview_source])
     qtbot.waitUntil(lambda: not controller.loading, timeout=15000)
@@ -108,6 +109,23 @@ def test_edit_preview_and_profile_workflow(controller, preview_source, tmp_path,
     assert controller.music_precision.currentData() == "float16"
     controller.music_device.setCurrentIndex(1)
     assert controller.music_precision.currentData() == "float32"
+    controller.assembler.tracks = [[clip, other], [clip], [clip]]
+    controller.refresh()
+    added.unlink()
+    controller.output_folder.setText(str(tmp_path))
+    with monkeypatch.context() as patch:
+        export = Mock()
+        patch.setattr(controller, "start_export", export)
+        controller.assembler.export_button.click()
+        export.assert_called_once()
+    assert controller.remove_missing_button.text() == "Remove missing (1)"
+    assert controller.remove_missing_button.isEnabled()
+    controller.remove_missing_button.click()
+    assert controller.clips == [clip]
+    assert controller.library.count() == 1
+    assert controller.assembler.tracks == [[clip], [clip], [clip]]
+    assert controller.remove_missing_button.text() == "Remove missing (0)"
+    assert not controller.remove_missing_button.isEnabled()
     controller.settings.sync()
     restored = app.Application()
     qtbot.addWidget(restored.window)
@@ -213,6 +231,13 @@ def test_two_divisions_render_independent_triples(
         path.hardlink_to(preview_source)
         clips.append(Clip(path, 0.5 + i / 10, 60, 120, True))
     controller.assembler.tracks = [[clip] for clip in clips]
+    controller.clips = clips
+    controller.normalization.setCurrentText("True Peak")
+    controller.refresh()
+    controller.assembler.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=60000)
+    measurements = dict(controller.normalization_cache)
+    assert len(measurements) == 8
     letters = "ABCDEFGH"[: columns * 2]
     first, second = (letters[:columns], letters[columns:])
     first_final = tmp_path / f"division_FINAL_{first}.mp4"
@@ -231,6 +256,7 @@ def test_two_divisions_render_independent_triples(
 
     monkeypatch.setattr(controller, "start_export_job", inspect_start)
     controller.start_export(tmp_path / "division.mp4")
+    assert not controller.measurement_keys
     assert not controller.assembler.divisions.isEnabled()
     assert not controller.assembler.columns.isEnabled()
     expected_groups = [
@@ -242,6 +268,7 @@ def test_two_divisions_render_independent_triples(
     assert [group[0] for group in controller.export_groups] == expected_groups
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.render_task.future.exception() is None
+    assert controller.normalization_cache == measurements
     assert bool(second_division_jobs) == combine
     outputs = (list(letters) if render_timelines else []) + (
         [f"FINAL_{first}", f"FINAL_{second}"] if combine else []
@@ -285,31 +312,81 @@ def test_two_divisions_render_independent_triples(
 def test_direct_division_preserves_existing_interims(
     controller, preview_source, tmp_path, qtbot, monkeypatch
 ):
-    normalization = "None"
+    normalization = "True Peak"
     import json
 
     controller.assembler.render_timelines.setChecked(False)
     controller.assembler.remove_timelines.setChecked(True)
     controller.combine.setChecked(True)
-    config = RenderConfig(
-        column_width=60, height=120, encoder="libx264", normalization=normalization
-    )
-    monkeypatch.setattr(controller, "render_config", lambda: config)
     audible = Clip(preview_source, 0.5, 60, 120, True)
     silent = Clip(preview_source, 0.2, 60, 120, False)
+    music_path = tmp_path / "music.mp4"
+    music_path.hardlink_to(preview_source)
+    music = Clip(music_path, 0.5, 60, 120, True)
+    controller.clips = [audible, music]
+    controller.assembler.tracks = [[music], [], []]
+    key = json.dumps([
+        "music-v2", app.MODEL_ID, app.MODEL_FILE, app.WINDOW_SECONDS,
+        {"music": controller.music_label.text(), "talking": controller.talking_label.text()},
+        app.BACKGROUND_LABELS, controller.source_audio_key(music),
+    ])
+    controller.classification_cache[key] = {"music": 0.99, "talking": 0.01}
+    controller.refresh()
+    controller.assembler.classify_timelines_button.click()
+    qtbot.waitUntil(lambda: not controller.running)
+    assert controller.audio_muted == {str(music_path)}
+    classification = dict(controller.classification_cache)
+    config = RenderConfig(
+        column_width=60, height=120, encoder="libx264", normalization=normalization,
+        audio_muted=set(controller.audio_muted),
+    )
+    monkeypatch.setattr(controller, "render_config", lambda: config)
     controller.assembler.tracks = [
-        [audible, silent, audible],
-        [audible],
-        [silent, audible],
+        [music, silent, audible],
+        [music],
+        [silent, music],
     ]
     controller.analysis_workers.setValue(8)
+    controller.normalization.setCurrentText(normalization)
+    controller.refresh()
+    controller.assembler.normalize_button.click()
+    qtbot.waitUntil(lambda: not controller.running, timeout=15000)
+    measurements = dict(controller.normalization_cache)
+    assert len(measurements) == 2
+    controller.assembler.normalize_button.click()
+    assert not controller.running
+    assert not controller.export_jobs
+    assert controller.normalization_cache == measurements
     for letter in "ABC":
         (tmp_path / f"direct_{letter}.mp4").write_bytes(b"existing interim")
     controller.start_export(tmp_path / "direct.mp4")
     qtbot.waitUntil(lambda: not controller.running, timeout=60000)
     assert controller.render_task.future.exception() is None
-    assert len(controller.export_jobs) == (3 if normalization == "True Peak" else 1)
-    assert len(controller.audio_peaks) == (2 if normalization == "True Peak" else 0)
+    assert len(controller.export_jobs) == 1
+    assert not controller.measurement_keys
+    assert controller.classification_cache == classification
+    assert controller.audio_muted == {str(music_path)}
+    assert controller.normalization_cache == measurements
+    import numpy as np
+
+    samples = np.frombuffer(subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(tmp_path / "direct_FINAL.mp4"),
+         "-map", "0:a:0", "-ac", "1", "-ar", "48000", "-f", "f32le", "-"],
+        capture_output=True, check=True,
+    ).stdout, dtype=np.float32)
+    assert np.max(np.abs(samples[:24000])) < 0.0001
+    assert np.max(np.abs(samples[38400:48000])) > 0.1
+    with monkeypatch.context() as patch:
+        launch = Mock()
+        patch.setattr(controller, "start_export_job", launch)
+        controller.start_export(tmp_path / "cached.mp4")
+        launch.assert_called_once()
+        assert not controller.measurement_keys
+        controller.end_export("Checked cached render")
+        config.audio_gains[str(preview_source)] = -6
+        controller.start_export(tmp_path / "changed-gain.mp4")
+        assert list(controller.measurement_keys.values()) == [tmp_path / "changed-gain_FINAL.mp4"]
+        controller.end_export("Checked changed mix")
     for letter in "ABC":
         assert (tmp_path / f"direct_{letter}.mp4").read_bytes() == b"existing interim"
     data = json.loads(
